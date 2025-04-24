@@ -1,0 +1,16 @@
+FileName: 'tpd220722_01.dat'
+Description: 'Methanol on Pt(111)'
+
+Masses: [44,18,28,2,32,16,14,31,30,2,28,40]
+# Assignments: ['Carbon monoxide (CO)','4','5','3','3']
+TChan: 12
+TScale: 1
+
+Simulations:
+  H2:
+    Peak1: {Offset: 54000, Scaling: 3500000, Coverage: 0.5, Barrier: 0.610, Prefactor: 1.5e+10, Order: 1}
+    Peak2: {Offset: 0, Scaling: 3500000, Coverage: 1, Barrier: 0.75, Prefactor: 1.5e+10, Order: 1}
+  CO:
+    Peak1: {Offset: 12000, Scaling: 850000, Coverage: 1, Barrier: 1.12, Prefactor: 1.0e+13, Order: 1}
+  Methanol:
+    Peak1: {Offset: 0, Scaling: 1000000, Coverage: 1, Barrier: 0.385, Prefactor: 3.59e+12, Order: 1}

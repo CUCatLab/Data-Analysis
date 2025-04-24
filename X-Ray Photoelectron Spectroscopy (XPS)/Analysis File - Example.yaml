@@ -1,0 +1,13 @@
+20240525_01:     # Name of the file (can put as many files as needed)
+  O1s:                     # Type of XPS scan (e.g. O1s, C1s, Overview, etc.)
+    Channel: 1                                 # Channel number for the data
+    Models:                                    # Models to be used for fitting (can add as many as needed)
+      Adsorbed:                                          # Model name
+        assignment: 'Adsorbed'                                     # Assignment for the model
+        model: 'Gaussian'                                          # Type of fit model
+        amplitude: {value: 2, min: 0}                              # Amplitude of the Gaussian
+        center: {value: 532, max: 533, min: 530, vary: True}       # Center of the Gaussian
+        sigma: {value: 0.4, vary: True}                            # Width of the Gaussian        
+  Ef: {Channel: 3}
+  Temperature: 600         # Temperature in Kelvin
+  xOffset: 729.8           # Fermi offset in eV

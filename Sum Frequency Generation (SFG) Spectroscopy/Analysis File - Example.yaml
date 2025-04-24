@@ -1,0 +1,27 @@
+FileName: 'sfg240322_01.sif'
+# DataName: 'sfg240322_01'
+Description: 'Methanol decomposition on Pt(111)'  #SFG methanol/Pt(111)
+Resolution: 1
+
+Background:
+  zRange: [500,700]
+  Threshold: 0.1
+Heating: 
+  Frame: [58,63,67,75,86,101,116,124,165]
+  Temperature: [282.54,297.20,308.95,332.29,364.44,408.35,452.03,475.45,595.17]
+  
+Fit:
+  xRange: [2000,2150]
+  zRange: [0, 500]
+  ModelType: 'SFG'
+  ShowFits: True
+        
+  Models:
+    NonRes:
+      amp: {value: 1, min: 0}
+    Peak1: # CO stretch, bridge
+      assignment: 'C-O'
+      amp: {value: 50, min: 0, vary: True}
+      phi: {value: 2.4, min: 0, max: 6.2, vary: True}
+      omega: {value: 2070, min: 2000, max: 2150, vary: True}
+      gamma: {value: 16, min: 0, max: 50, vary: True}
