@@ -253,13 +253,16 @@ class UI :
         dt = dataTools()
         at = analysisTools()
 
-        self.cwd = Path(os.getcwd())
-
         self.FoldersLabel = '-------Folders-------'
         self.FilesLabel = '-------Files-------'
         
         with open(settingsFile, 'r') as stream :
             settings = yaml.safe_load(stream)
+            
+        if os.path.isdir(settings['folders']['current']) :
+            self.cwd = settings['folders']['current']
+        else :
+            self.cwd = str(Path(os.getcwd()))
         
         out = ipw.Output()
 
@@ -342,8 +345,15 @@ class UI :
                 self.data = data
                 self.parameters = parameters
                 dt.plotData(data)
+                display(Data2Clipboard)
         ShowData = ipw.Button(description="Show data")
         ShowData.on_click(ShowData_Clicked)
+        
+        def Data2Clipboard_Clicked(b):
+            DataToSave = self.data
+            DataToSave.to_clipboard()
+        Data2Clipboard = ipw.Button(description="Copy Data")
+        Data2Clipboard.on_click(Data2Clipboard_Clicked)
 
         def SimulateTrace_Clicked(b) :
             with out :

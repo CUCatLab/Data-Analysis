@@ -27,18 +27,18 @@ class dataTools :
 
         pass
 
-    def loadData(self, file, folder) :
+    def loadData(self, file, settings) :
         
-        def FolderPath(file, folder) :
+        def FolderPath(file) :
             date = re.split(r'sfg|_',file)[1]
-            return folder+'/'+'20'+date[0:2]+'/'+'20'+date[0:2]+'.'+date[2:4]+'.'+date[4:6]
+            return settings['folders']['data']+'/'+'20'+date[0:2]+'/'+'20'+date[0:2]+'.'+date[2:4]+'.'+date[4:6]
 
-        with open(file, 'r') as stream :
+        with open(settings['folders']['current']+'/'+file, 'r') as stream :
             parameters = yaml.safe_load(stream)
         
         if 'FolderPath' not in parameters :
-            parameters['FolderPath'] = FolderPath(file, folder)
-        
+            parameters['FolderPath'] = FolderPath(file)
+        print(parameters['FolderPath'])
         Data = self.loadSFG(parameters)
         Threshold = parameters['Background']['Threshold']
         data = self.removeEmptyDataSets(Data,Threshold)
@@ -601,33 +601,31 @@ class UI :
     def __init__(self) :
 
         dt = dataTools()
-        
-        self.cwd = Path(os.getcwd())
 
         self.FoldersLabel = '-------Folders-------'
         self.FilesLabel = '-------Files-------'
         self.settingsFile = settingsFile
-
+        
         with open(settingsFile, 'r') as stream :
-            self.folders = yaml.safe_load(stream)['folders']
+            settings = yaml.safe_load(stream)
+            
+        if os.path.isdir(settings['folders']['current']) :
+            self.cwd = settings['folders']['current']
+        else :
+            self.cwd = str(Path(os.getcwd()))
     
         out = ipw.Output()
-        anout = ipw.Output()
 
-        dataFolder = ipw.Text(value=self.folders['data'],
+        dataFolder = ipw.Text(value=settings['folders']['data'],
             layout=Layout(width='70%'),
             style = {'width': '100px','description_width': '150px'},
             description='Data Folder')
 
         def changeDataFolder(value) :
             if value['new'] :
-                with open(self.settingsFile, 'r') as f :
-                    data = yaml.safe_load(f)
-                data['folders']['data'] = dataFolder.value
-                self.folders['data'] = dataFolder.value
-                with open(self.settingsFile, 'w') as f:
-                    yaml.dump(data, f)
-                print('cool')
+                settings['folders']['data'] = dataFolder.value
+                with open(settingsFile, 'w') as f:
+                    yaml.dump(settings, f)
         dataFolder.observe(changeDataFolder, names='value')
 
         def go_to_address(address):
@@ -639,6 +637,9 @@ class UI :
                 selectFolder.observe(selecting, names='value')
                 selectFolder.value = None
                 selectFile.options = self.get_folder_contents(folder=address)[1]
+                settings['folders']['current'] = str(address)
+                with open(settingsFile, 'w') as f:
+                    yaml.dump(settings, f)
 
         def newaddress(value):
             go_to_address(currentFolder_field.value)
@@ -684,7 +685,7 @@ class UI :
         def ShowData_Clicked(b) :
             with out :
                 clear_output(True)
-                data, parameters = dt.loadData(selectFile.value,dataFolder.value)
+                data, parameters = dt.loadData(selectFile.value,settings)
                 self.data = data
                 self.parameters = parameters
                 plt.figure(figsize = [8,6])
@@ -735,7 +736,6 @@ class UI :
         display(ipw.HBox([ShowData,FitData]))
 
         display(out)
-        display(anout)
     
     def get_folder_contents(self,folder):
 
