@@ -182,6 +182,7 @@ class dataTools :
     def plotData(self,data) :
 
         fig = go.Figure()
+        fig.update_layout(height=750)
         for Trace in data :
             if Trace != 'Time (s)' and Trace != 'Time':
                 fig.add_trace(go.Scatter(x=data.index,y=data[Trace],name=Trace,mode='lines'))
