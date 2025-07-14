@@ -392,7 +392,7 @@ class analysisTools :
         
         for idx, Column in enumerate(data) :
             
-            modelParameters = setParameters(fitParameters, fitModel)
+            modelParameters = setParameters(fitParameters, fitModel, Value=Column)
             
             y = data[Column].values
             fitResults = fitModel.fit(y, modelParameters, x=x, nan_policy='omit')
