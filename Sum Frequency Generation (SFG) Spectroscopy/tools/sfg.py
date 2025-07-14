@@ -704,7 +704,7 @@ class UI :
         def FitData_Clicked(b) :
             with out :
                 clear_output(True)
-                data, parameters = dt.loadData(selectFile.value,dataFolder.value)
+                data, parameters = dt.loadData(selectFile.value,settings)
                 self.data = data
                 self.parameters = parameters
                 if 'Files' in parameters['Background'] :
