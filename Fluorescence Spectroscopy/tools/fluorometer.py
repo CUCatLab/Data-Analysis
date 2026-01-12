@@ -157,6 +157,11 @@ class analysisTools :
         plt.tick_params(axis="x", labelsize=fontsize, rotation=-90)
         plt.tick_params(axis="y", labelsize=fontsize)
         plt.show()
+        
+        df = pd.DataFrame()
+        df['Integrated Values'] = integratedValues
+        df.index = data.columns
+        
         return integratedValues
 
     def Fit(self,data,limits) :
@@ -208,7 +213,12 @@ class analysisTools :
         plt.grid(True)
         plt.show()
         
-        return integratedAreas, peakValues
+        df = pd.DataFrame()
+        df[']Integrated Areas'] = integratedAreas
+        df['Peak Values'] = peakValues
+        df.index = data.columns
+        
+        return df
 
 
 class UI :
@@ -382,6 +392,7 @@ class UI :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
                 self.integratedValues = at.Integrate(self.spectra, limits)
+                display(IntegratedToClipboard)
         Integrate = ipw.Button(description="Integrate")
         Integrate.on_click(Integrate_clicked)
         
@@ -389,7 +400,8 @@ class UI :
             with anout :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
-                self.integratedAreas, self.peakValues = at.Fit(self.spectra, limits)
+                self.fitAnalysis = at.Fit(self.spectra, limits)
+                display(FitAnalysisToClipboard)
         Fit = ipw.Button(description="Fit")
         Fit.on_click(Fit_clicked)
 
@@ -403,6 +415,20 @@ class UI :
             dataToSave.to_clipboard()
         SpectraToClipboard = ipw.Button(description="Copy Spectra")
         SpectraToClipboard.on_click(SpectraToClipboard_Clicked)
+
+        def IntegratedToClipboard_Clicked(b):
+            dataToSave = self.integratedValues
+            display(dataToSave)
+            dataToSave.to_clipboard()
+        IntegratedToClipboard = ipw.Button(description="Copy Integrated Data")
+        IntegratedToClipboard.on_click(IntegratedToClipboard_Clicked)
+        
+        def FitAnalysisToClipboard_Clicked(b):
+            dataToSave = self.fitAnalysis
+            display(dataToSave)
+            dataToSave.to_clipboard()
+        FitAnalysisToClipboard = ipw.Button(description="Copy Fit Analysis")
+        FitAnalysisToClipboard.on_click(FitAnalysisToClipboard_Clicked)
         
         LowLim = ipw.IntSlider(
             value=0,
@@ -429,12 +455,6 @@ class UI :
             readout=True,
             readout_format='d'
             )
-        
-        def IntegratedToClipboard_Clicked(b):
-            dataToSave = at.integratedValues
-            dataToSave.to_clipboard()
-        IntegratedToClipboard = ipw.Button(description="Copy integrated data")
-        IntegratedToClipboard.on_click(IntegratedToClipboard_Clicked)
 
         display(ipw.HBox([folderField]))
         display(ipw.HBox([SelectFolder,up_button]))
