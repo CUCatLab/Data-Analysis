@@ -1,5 +1,4 @@
 import numpy as np
-import scipy
 from scipy import integrate
 import pandas as pd
 from pandas import DataFrame as df
@@ -7,14 +6,11 @@ import yaml
 import matplotlib.pyplot as plt
 from lmfit.models import SkewedGaussianModel
 import ipywidgets as ipw
-from ipywidgets import Button, Layout
+from ipywidgets import Layout
 from IPython.display import clear_output
-from IPython.display import display_html
 import os
-from os import listdir
-from os.path import isfile, join
 from pathlib import Path
-import csv
+import io
 
 
 settingsFile = 'tools/settings.yaml'
@@ -74,6 +70,8 @@ class dataTools :
         return data
     
     def createSpectra(self,data,Runs,Buffer='None',CamCorrection=False) :
+        
+        Runs = np.array(Runs, dtype=float)
         
         if Buffer != 'None' :
             data = data.sub(data[Buffer], axis=0)
@@ -158,10 +156,6 @@ class analysisTools :
         plt.tick_params(axis="y", labelsize=fontsize)
         plt.show()
         
-        df = pd.DataFrame()
-        df['Integrated Values'] = integratedValues
-        df.index = data.columns
-        
         return integratedValues
 
     def Fit(self,data,limits) :
@@ -230,6 +224,7 @@ class UI :
         
         self.BufferNames = ['None']
         self.Names = ['']
+        self.titration = None
 
         self.FoldersLabel = '-------Folders-------'
         self.FilesLabel = '-------Files-------'
@@ -311,11 +306,13 @@ class UI :
             self.data = dt.loadData(folderField.value,SelectFile.value)
             self.filename = SelectFile.value
             RunList()
+            Upload_Titration.value = ()
+            Upload_Titration._counter=0
         load_button = ipw.Button(description='Load',layout=Layout(width='10%'))
         load_button.on_click(load)
 
         def RunList():
-            self.Runs = list(self.data.columns.values)
+            self.Runs = list(self.data.columns.values.astype(str))
             Runs = [k for k in self.Runs if self.Filter.value in k]
             self.Runs_Selected.options = Runs
             Runs.insert(0,'None')
@@ -333,6 +330,47 @@ class UI :
             RunList()
         Update_RunList = ipw.Button(description="Update run list")
         Update_RunList.on_click(Update_RunList_Clicked)
+
+        # Create upload widget
+        Upload_Titration = ipw.FileUpload(
+            accept='.csv, .xlsx',  # allowed file types
+            multiple=False,
+            description='Select Titration File',
+            layout=ipw.Layout(width='170px')
+        )
+
+        def on_uploadTitration_change(change):
+            data = self.data
+            titration = self.titration
+            if not Upload_Titration.value:
+                print("⚠️ No file uploaded.")
+                return
+            for file_info in Upload_Titration.value:
+                filename = file_info['name']
+                content = file_info['content']
+                print(f"📂 Uploaded: {filename}")
+                try:
+                    if filename.lower().endswith('.csv'):
+                        titration = pd.read_csv(io.BytesIO(content))
+                    elif filename.lower().endswith('.xlsx'):
+                        titration = pd.read_excel(io.BytesIO(content))
+                    else:
+                        print("❌ Unsupported file type.")
+                        titration = None
+                        return
+                    
+                    print("✅ File loaded successfully!")
+                except Exception as e:
+                    print(f"❌ Error reading file: {e}")
+                    titration = None
+            self.titration = titration
+            if data.shape[1] == titration.shape[0]:
+                data.columns = titration.iloc[:,0].values
+            else:
+                print('Titration data length does not match number of runs.')
+            RunList()
+            print('ok')
+        Upload_Titration.observe(on_uploadTitration_change, names='value')
 
         self.Runs_Selected = ipw.SelectMultiple(
             options='',
@@ -361,8 +399,9 @@ class UI :
 
         def Plot_Clicked(b):
             with out :
+                data = self.data
                 clear_output()
-                spectra = dt.createSpectra(self.data,self.Runs_Selected.value,Buffer=self.Buffer.value,CamCorrection=self.CamCorrection.value)
+                spectra = dt.createSpectra(data,self.Runs_Selected.value,Buffer=self.Buffer.value,CamCorrection=self.CamCorrection.value)
                 self.fig = dt.plot(spectra)
                 display(ipw.Box([SavePlot,SpectraToClipboard,Plot2D]))
                 display(ipw.Box([Integrate,Fit]))
@@ -459,10 +498,9 @@ class UI :
         display(ipw.HBox([folderField]))
         display(ipw.HBox([SelectFolder,up_button]))
         display(ipw.HBox([SelectFile,load_button]))
-        display(ipw.Box([self.Filter,Update_RunList]))
+        display(ipw.Box([self.Filter,Update_RunList,Upload_Titration]))
         display(ipw.Box([self.Runs_Selected,Plot]))
         display(ipw.Box([self.Buffer,self.CamCorrection]))
-        
 
         display(out)
         display(anout)
