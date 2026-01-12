@@ -5,6 +5,7 @@ import pandas as pd
 from pandas import DataFrame as df
 import yaml
 import matplotlib.pyplot as plt
+from lmfit.models import SkewedGaussianModel
 import ipywidgets as ipw
 from ipywidgets import Button, Layout
 from IPython.display import clear_output
@@ -31,30 +32,30 @@ class dataTools :
         try :
             with open(filepath) as f:
                 Content = f.readlines()
-            DataLength = list()
+            dataLength = list()
             for index in range(len(Content)):
-                DataLength.append(len(Content[index].split('\t')))
-            DataStart = list()
-            DataEnd = list()
+                dataLength.append(len(Content[index].split('\t')))
+            dataStart = list()
+            dataEnd = list()
             Counter = 0
-            for index in range(len(DataLength)):
-                if DataLength[index] == 1 :
-                    if Counter > 1 : DataEnd.append(index-1)
+            for index in range(len(dataLength)):
+                if dataLength[index] == 1 :
+                    if Counter > 1 : dataEnd.append(index-1)
                     Counter = 0
                 else :
-                    if Counter == 0 : DataStart.append(index+3)
+                    if Counter == 0 : dataStart.append(index+3)
                     Counter = Counter + 1
             Header = list()
-            DataSets = 0
-            for index in range(len(DataStart)):
-                DataSets = DataSets + DataLength[DataStart[index]]
-            data = np.zeros((DataSets,DataEnd[0]-DataStart[0]+1))
-            for index in range(len(DataStart)):
-                for x in range(DataLength[DataStart[index]]):
-                    Header.append(Content[DataStart[index]-2].split('\t')[x])
-                    for y in range(DataEnd[0]-DataStart[0]+1):
-                        if Content[DataStart[index]+y].split('\t')[x] != '' :
-                            data[x + index * DataLength[DataStart[index-1]]][y] = Content[DataStart[index]+y].split('\t')[x]
+            dataSets = 0
+            for index in range(len(dataStart)):
+                dataSets = dataSets + dataLength[dataStart[index]]
+            data = np.zeros((dataSets,dataEnd[0]-dataStart[0]+1))
+            for index in range(len(dataStart)):
+                for x in range(dataLength[dataStart[index]]):
+                    Header.append(Content[dataStart[index]-2].split('\t')[x])
+                    for y in range(dataEnd[0]-dataStart[0]+1):
+                        if Content[dataStart[index]+y].split('\t')[x] != '' :
+                            data[x + index * dataLength[dataStart[index-1]]][y] = Content[dataStart[index]+y].split('\t')[x]
             for index in range(2,int(len(data)/2)+1):
                 data = np.delete(data,index,axis=0)
                 Header.remove(Header[index-1])
@@ -63,17 +64,19 @@ class dataTools :
             data = pd.DataFrame(data=np.transpose(data),columns=Header)
             data = data[data.columns.drop(list(data.filter(regex='ExCorr')))]
             data.set_index('X', inplace=True)
+            print('Data file loaded successfully.')
         
         except :
             
             data = pd.DataFrame(columns=[''])
+            print('Error loading data file.')
         
         return data
     
-    def createSpectra(self,Data,Runs,Buffer='None',CamCorrection=False) :
+    def createSpectra(self,data,Runs,Buffer='None',CamCorrection=False) :
         
         if Buffer != 'None' :
-            Data = Data.sub(Data[Buffer], axis=0)
+            data = data.sub(data[Buffer], axis=0)
         
         if CamCorrection :
             
@@ -84,34 +87,53 @@ class dataTools :
                 with open(file_path, 'r'):
                     Cam = pd.read_csv(file_path)
                     Cam.set_index('X', inplace=True)
-                    for name in Data.columns :
-                        scaling = np.average(Data[name].values[0:3] / Cam['Y'].values[0:3])
-                        Data[name] -= scaling*Cam['Y']
+                    for name in data.columns :
+                        scaling = np.average(data[name].values[0:3] / Cam['Y'].values[0:3])
+                        data[name] -= scaling*Cam['Y']
                         
             except FileNotFoundError:
                 print("Calmodulin data does not exist. Skipping tyrosine removal.")
         
-        Data = Data.filter(items=Runs)
+        data = data.filter(items=Runs)
         
-        
-        
-        return Data
+        return data
     
-    def plotData(self,Data,Labels='',Title='') :
+    def plot(self,data,Title='') :
         
-        fontsize = 20
+        fontsize = 16
         fig, ax = plt.subplots(figsize=(10,8))
-        for name in Data.columns :
-            plt.plot(Data[name],label=name)
-        plt.plot(Data)
-        plt.legend(frameon=False, bbox_to_anchor=(1.02, 1), fontsize=fontsize)
-        plt.xlabel('Wavelength (nm)',fontsize=fontsize), plt.ylabel('Intensity (au)',fontsize=fontsize)
+        for name in data.columns :
+            plt.plot(data[name],label=name)
+        plt.plot(data)
+        plt.legend(frameon=False, bbox_to_anchor=(1.02, 1), fontsize=fontsize*0.75)
+        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
+        plt.ylabel('Intensity (au)',fontsize=fontsize)
         plt.title(Title, fontsize=fontsize)
         ax.tick_params(axis='both',which='both',labelsize=fontsize,direction="in")
         ax.minorticks_on()
         plt.show()
         
         return fig
+
+    def plot2D(self,data,Title='') :
+        
+        fontsize = 14
+        data = data.T
+        plt.figure(figsize=(10,6))
+        im = plt.imshow(data.values, 
+                        origin='lower',         # Lower-left corner is (0,0)
+                        cmap='turbo',           # Colormap
+                        aspect='auto',          # Adjust aspect ratio
+                        extent=[data.columns.min(), data.columns.max(),
+                                data.index.min(), data.index.max()])
+        cbar = plt.colorbar(im)
+        cbar.ax.tick_params(labelsize=fontsize)
+        cbar.set_label("Intensity", fontsize=fontsize)
+        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
+        plt.ylabel('Run',fontsize=fontsize)
+        plt.tick_params(axis='both', which='both', labelsize=fontsize, direction="in")
+        plt.yticks([])
+        plt.show()
 
 
 class analysisTools :
@@ -120,17 +142,73 @@ class analysisTools :
 
         pass
 
-    def Integrate(self, data, xmin, xmax):
-        mask = data['X'].isin(range(xmin, xmax+1))
-        idata = data[mask]
+    def Integrate(self, data, limits):
+        data = data.loc[(data.index >= min(limits)) & (data.index <= max(limits))]
         integratedValues = list()
-        for idx, column in enumerate(idata) :
-            if idx > 0 :
-                x = idata['X'].values
-                y = idata[column].values
-                integratedValues.append(integrate.trapezoid(y,x=x))
-        integratedValues = pd.DataFrame(data=integratedValues,index=data.columns[1:],columns=['Integrated'])
-        return idata, integratedValues
+        for idx, column in enumerate(data) :
+            x = data.index.to_numpy()
+            y = data[column].to_numpy()
+            integratedValues.append(integrate.trapezoid(y,x=x))
+        integratedValues = pd.DataFrame(data=integratedValues,index=data.columns,columns=['Integrated'])
+        fontsize = 14
+        plt.figure(figsize=(12,4))
+        plt.xlabel('Run',fontsize=fontsize), plt.ylabel('Integrated Value',fontsize=fontsize)
+        plt.plot(integratedValues, '.-')
+        plt.tick_params(axis="x", labelsize=fontsize, rotation=-90)
+        plt.tick_params(axis="y", labelsize=fontsize)
+        plt.show()
+        return integratedValues
+
+    def Fit(self,data,limits) :
+        
+        fontsize = 14
+        integratedAreas = list()
+        peakValues = list()
+        data2fit = data.loc[(data.index >= min(limits)) & (data.index <= max(limits))]
+        plt.figure(figsize=(10, 6))
+        x_vals = data2fit.index.to_numpy()
+        for col in data2fit.columns:
+            y_vals = data2fit[col].to_numpy()
+            model = SkewedGaussianModel()
+            params = model.guess(y_vals, x=x_vals)
+            result = model.fit(y_vals, params, x=x_vals)
+            plt.scatter(data.index.to_numpy(), data[col].to_numpy(), s=20)
+            plt.plot(x_vals, result.best_fit, linewidth=2, label=f'{col}')
+            
+            integratedAreas.append(result.params['amplitude'].value)
+            peakValues.append(x_vals[np.argmax(result.best_fit)])
+
+        # Finalize plot
+        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
+        plt.ylabel('Intensity (au)',fontsize=fontsize)
+        plt.tick_params(axis="x", labelsize=fontsize)
+        plt.tick_params(axis="y", labelsize=fontsize)
+        plt.title('Fits')
+        plt.legend(frameon=False)
+        plt.grid(True)
+        plt.show()
+        
+        # Plot integrated areas
+        plt.figure(figsize=(10, 3))
+        plt.plot(data2fit.columns, integratedAreas, 'o-')
+        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
+        plt.ylabel('Intensity (au)',fontsize=fontsize)
+        plt.tick_params(axis="both", labelsize=fontsize)
+        plt.title('Integrated areas')
+        plt.grid(True)
+        plt.show()
+        
+        # Plot peak values
+        plt.figure(figsize=(10, 3))
+        plt.plot(data2fit.columns, peakValues, 'o-')
+        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
+        plt.ylabel('Intensity (au)',fontsize=fontsize)
+        plt.tick_params(axis="both", labelsize=fontsize)
+        plt.title('Peak values')
+        plt.grid(True)
+        plt.show()
+        
+        return integratedAreas, peakValues
 
 
 class UI :
@@ -269,51 +347,62 @@ class UI :
             description='Subtract CaM?',
             disabled=False,
             indent=False
-)
+        )
 
         def Plot_Clicked(b):
             with out :
                 clear_output()
-                self.Spectra = dt.createSpectra(self.data,self.Runs_Selected.value,Buffer=self.Buffer.value,CamCorrection=self.CamCorrection.value)
-                self.fig = dt.plotData(self.Spectra)
+                spectra = dt.createSpectra(self.data,self.Runs_Selected.value,Buffer=self.Buffer.value,CamCorrection=self.CamCorrection.value)
+                self.fig = dt.plot(spectra)
+                display(ipw.Box([SavePlot,SpectraToClipboard,Plot2D]))
+                display(ipw.Box([Integrate,Fit]))
                 display(LowLim)
                 display(UpLim)
-                display(ipw.Box([button_Integrate,SavePlot,SpectraToClipboard]))
             with anout :
                 clear_output()
-            LowLim.max = max(self.Spectra.index)
-            LowLim.min = min(self.Spectra.index)
-            LowLim.value = min(self.Spectra.index)
-            UpLim.max = max(self.Spectra.index)
-            UpLim.min = min(self.Spectra.index)
-            UpLim.value = max(self.Spectra.index)
+            LowLim.max = max(spectra.index)
+            LowLim.min = min(spectra.index)
+            LowLim.value = min(spectra.index)
+            UpLim.max = max(spectra.index)
+            UpLim.min = min(spectra.index)
+            UpLim.value = max(spectra.index)
+            self.spectra = spectra
         Plot = ipw.Button(description="Plot")
         Plot.on_click(Plot_Clicked)
+        
+        def Plot2d_Clicked(b):
+            with anout :
+                clear_output()
+                dt.plot2D(self.spectra)
+        Plot2D = ipw.Button(description="Plot 2D")
+        Plot2D.on_click(Plot2d_Clicked)
 
-        def SpectraToClipboard_Clicked(b):
-            DataToSave = self.Spectra
-            DataToSave.to_clipboard()
-        SpectraToClipboard = ipw.Button(description="Copy Plot Data")
-        SpectraToClipboard.on_click(SpectraToClipboard_Clicked)
+        def Integrate_clicked(b):
+            with anout :
+                clear_output()
+                limits = [LowLim.value, UpLim.value]
+                self.integratedValues = at.Integrate(self.spectra, limits)
+        Integrate = ipw.Button(description="Integrate")
+        Integrate.on_click(Integrate_clicked)
+        
+        def Fit_clicked(b):
+            with anout :
+                clear_output()
+                limits = [LowLim.value, UpLim.value]
+                self.integratedAreas, self.peakValues = at.Fit(self.spectra, limits)
+        Fit = ipw.Button(description="Fit")
+        Fit.on_click(Fit_clicked)
 
         def SavePlot_Clicked(b):
             self.fig.savefig(self.filename.replace('.txt','.jpg'),bbox_inches='tight')
         SavePlot = ipw.Button(description="Save Plot")
         SavePlot.on_click(SavePlot_Clicked)
-
-        def Integrate(b):
-            with anout :
-                clear_output()
-                self.idata, self.integratedValues = at.Integrate(self.Spectra, LowLim.value, UpLim.value)
-                self.idata = pd.DataFrame(index=self.Spectra.columns)
-                plt.figure(figsize=(13,7))
-                plt.xlabel('Run',fontsize=16), plt.ylabel('Integrated Value',fontsize=16)
-                plt.plot(self.integratedValues, '.-')
-                plt.tick_params(axis="x", labelsize=16, rotation=-90)
-                plt.tick_params(axis="y", labelsize=16)
-                plt.show()
-        button_Integrate = ipw.Button(description="Integrate")
-        button_Integrate.on_click(Integrate)
+        
+        def SpectraToClipboard_Clicked(b):
+            dataToSave = self.spectra
+            dataToSave.to_clipboard()
+        SpectraToClipboard = ipw.Button(description="Copy Spectra")
+        SpectraToClipboard.on_click(SpectraToClipboard_Clicked)
         
         LowLim = ipw.IntSlider(
             value=0,
@@ -342,8 +431,8 @@ class UI :
             )
         
         def IntegratedToClipboard_Clicked(b):
-            DataToSave = at.integratedValues
-            DataToSave.to_clipboard()
+            dataToSave = at.integratedValues
+            dataToSave.to_clipboard()
         IntegratedToClipboard = ipw.Button(description="Copy integrated data")
         IntegratedToClipboard.on_click(IntegratedToClipboard_Clicked)
 
