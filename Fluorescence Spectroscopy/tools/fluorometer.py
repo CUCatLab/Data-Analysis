@@ -71,7 +71,10 @@ class dataTools :
     
     def createSpectra(self,data,Runs,Buffer='None',CamCorrection=False) :
         
-        Runs = np.array(Runs, dtype=float)
+        try:
+            Runs = np.array(Runs, dtype=float)
+        except:
+            pass
         
         if Buffer != 'None' :
             data = data.sub(data[Buffer], axis=0)
