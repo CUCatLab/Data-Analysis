@@ -142,8 +142,24 @@ class analysisTools :
     def __init__(self) :
 
         pass
+    
+    def ExtractTitration(self,data) :
+        
+        if any('D1' in col for col in data.columns):
+            pass
+        else:
+            titration = list()
+            for column in data.columns :
+                try :
+                    titration.append(float(column.split(' ')[0]))
+                except :
+                    titration.append(column)
+            data.columns = titration
+        return data
 
     def Integrate(self, data, limits):
+        
+        data = self.ExtractTitration(data)
         data = data.loc[(data.index >= min(limits)) & (data.index <= max(limits))]
         integratedValues = list()
         for idx, column in enumerate(data) :
@@ -158,11 +174,11 @@ class analysisTools :
         plt.tick_params(axis="x", labelsize=fontsize, rotation=-90)
         plt.tick_params(axis="y", labelsize=fontsize)
         plt.show()
-        
         return integratedValues
 
     def Fit(self,data,limits) :
         
+        data = self.ExtractTitration(data)
         fontsize = 14
         integratedAreas = list()
         peakValues = list()
@@ -368,7 +384,14 @@ class UI :
                     titration = None
             self.titration = titration
             if data.shape[1] == titration.shape[0]:
-                data.columns = titration.iloc[:,0].values
+                columns = list()
+                for col in titration.iloc[:,0] :
+                    try :
+                        float(col)
+                        columns.append(str(col)+' '+titration.columns[0])
+                    except :
+                        columns.append(col)
+                data.columns = columns
             else:
                 print('Titration data length does not match number of runs.')
             RunList()
@@ -430,19 +453,21 @@ class UI :
         Plot2D.on_click(Plot2d_Clicked)
 
         def Integrate_clicked(b):
+            spectra = self.spectra.copy(deep=True)
             with anout :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
-                self.integratedValues = at.Integrate(self.spectra, limits)
+                self.integratedValues = at.Integrate(spectra, limits)
                 display(IntegratedToClipboard)
         Integrate = ipw.Button(description="Integrate")
         Integrate.on_click(Integrate_clicked)
         
         def Fit_clicked(b):
+            spectra = self.spectra.copy(deep=True)
             with anout :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
-                self.fitAnalysis = at.Fit(self.spectra, limits)
+                self.fitAnalysis = at.Fit(spectra, limits)
                 display(FitAnalysisToClipboard)
         Fit = ipw.Button(description="Fit")
         Fit.on_click(Fit_clicked)
