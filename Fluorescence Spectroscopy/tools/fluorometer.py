@@ -50,9 +50,11 @@ def _local(tag: str) -> str:
     return tag.split('}', 1)[-1] if '}' in tag else tag
 
 def _elem_text(e: Optional[ET.Element]) -> str:
+    
     return "" if e is None else (e.text or "")
 
 def _is_monotonic_increasing(xs: List[float]) -> bool:
+    
     return all(xs[i] < xs[i+1] for i in range(len(xs)-1))
 
 # ---------- name resolution with parent map ----------
@@ -103,12 +105,14 @@ WAVEL_TAGS = {"Wavelengths", "Wavelength", "X", "XAxis", "WL"}
 INTENS_TAGS = {"Intensities", "Intensity", "Y", "YAxis", "Data", "Values"}
 
 def _first_child_by_tag_set(parent: ET.Element, tagset: set) -> Optional[ET.Element]:
+    
     for ch in list(parent):
         if _local(ch.tag) in tagset:
             return ch
     return None
 
 def _extract_pattern_a(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
+    
     spectra: List[Tuple[str, List[float], List[float]]] = []
     for node in root.iter():
         w0 = _first_child_by_tag_set(node, WAVEL_TAGS)
@@ -169,6 +173,7 @@ def _leaf_numeric_map(elem: ET.Element) -> dict:
     return out
 
 def _extract_pattern_b(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
+    
     spectra: List[Tuple[str, List[float], List[float]]] = []
     for node in root.iter():
         kids = list(node)
@@ -268,13 +273,12 @@ def read_gxz_to_dataframe(path: str) -> pd.DataFrame:
 class dataTools :
 
     def __init__(self) :
-
+        
         pass
 
-    def loadData(self,folder,file) :
+    def loadText(self,folder,file) :
         
         filepath = folder + '/' + file
-        
         try :
             with open(filepath) as f:
                 Content = f.readlines()
@@ -311,15 +315,14 @@ class dataTools :
             data = data[data.columns.drop(list(data.filter(regex='ExCorr')))]
             data.set_index('X', inplace=True)
             print('Data file loaded successfully.')
-        
         except :
-            
             data = pd.DataFrame(columns=[''])
             print('Error loading data file.')
         
         return data
 
     def loadGXZ(self, folder: str, file: str) -> pd.DataFrame:
+        
         path = str(Path(folder) / file)
         try:
             data = read_gxz_to_dataframe(path)
@@ -330,6 +333,7 @@ class dataTools :
         return data
 
     def createSpectra(self,data,Runs,Buffer='None',TyrScale=0) :
+        
         spectra = data.copy(deep=True)
         if Buffer != 'None':
             spectra = spectra.sub(spectra[Buffer], axis=0)
@@ -357,31 +361,33 @@ class dataTools :
                     print("Calmodulin data not found in settings. Skipping tyrosine removal.")
             except Exception as e:
                 print(f"CaM subtraction skipped due to error: {e}")
-
         # Keep only selected runs, but preserve order
         runs = list(Runs) if isinstance(Runs, (list, tuple)) else [Runs]
         spectra = spectra.filter(items=runs)
         return spectra
     
-    def plot(self,data,Title='') :
+    def plot(self, data, Title=''):
         
         fontsize = 16
-        fig, ax = plt.subplots(figsize=(10,8))
-        for name in data.columns :
-            ax.plot(data.index, data[name], label=name, lw=1.5)
-        plt.plot(data)
-        plt.legend(frameon=False, bbox_to_anchor=(1.02, 1), fontsize=fontsize*0.75)
-        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
-        plt.ylabel('Intensity (au)',fontsize=fontsize)
-        plt.title(Title, fontsize=fontsize)
-        ax.tick_params(axis='both',which='both',labelsize=fontsize,direction="in")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        handles = []
+        labels = []
+        for name in data.columns:
+            ln, = ax.plot(data.index, data[name], label=name, lw=1.5)  # returns a Line2D
+            handles.append(ln)
+            labels.append(name)
+        ax.legend(handles, labels, frameon=False, bbox_to_anchor=(1.02, 1), fontsize=fontsize*0.75)
+        ax.set_xlabel('Wavelength (nm)', fontsize=fontsize)
+        ax.set_ylabel('Intensity (au)', fontsize=fontsize)
+        ax.set_title(Title, fontsize=fontsize)
+        ax.tick_params(axis='both', which='both', labelsize=fontsize, direction="in")
         ax.minorticks_on()
         fig.tight_layout()
         plt.show()
-        
         return fig
 
     def plot2D(self, data, Title=''):
+        
         fontsize = 14
         M = data.T  # rows=runs, cols=wavelength
         x = M.columns.to_numpy()
@@ -597,7 +603,7 @@ class UI :
             if suffix.endswith('.gxz'):
                 self.data = dt.loadGXZ(folderField.value, SelectFile.value)
             else:
-                self.data = dt.loadData(folderField.value, SelectFile.value)
+                self.data = dt.loadText(folderField.value, SelectFile.value)
             self.filename = SelectFile.value
             RunList()
             Upload_Titration.value = ()
