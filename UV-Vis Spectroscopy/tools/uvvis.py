@@ -18,8 +18,6 @@ import xml.etree.ElementTree as ET
 from typing import List, Tuple, Optional
 from scipy.optimize import curve_fit
 
-settingsFile = 'tools/settings.yaml'
-
 
 class dataTools :
 
@@ -248,26 +246,6 @@ class UI :
 
         dt = dataTools()
         at = analysisTools()
-        
-        self.BufferNames = ['None']
-        self.Names = ['']
-
-        self.FoldersLabel = '-------Folders-------'
-        self.FilesLabel = '-------Files-------'
-        self.settingsFile = settingsFile
-        
-        
-        try:
-            with open(self.settingsFile, 'r') as stream:
-                settings = yaml.safe_load(stream) or {}
-        except FileNotFoundError:
-            settings = {'folders': {'data': str(Path.cwd())}, 'files': {}}
-
-
-        if os.path.isdir(settings['folders']['data']) :
-            self.cwd = settings['folders']['data']
-        else :
-            self.cwd = str(Path(os.getcwd()))
 
         out = ipw.Output()
         anout = ipw.Output()
