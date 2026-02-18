@@ -16,258 +16,11 @@ import gzip
 import re
 import xml.etree.ElementTree as ET
 from typing import List, Tuple, Optional
-
-settingsFile = 'tools/settings.yaml'
-
-# ===================== FelixGX .gxz (GZIPped XML) support =====================
 import gzip, re, xml.etree.ElementTree as ET
 from itertools import combinations
 from typing import List, Tuple, Optional
-import pandas as pd
 
-# ---------- shared helpers ----------
-_NUM_SPLIT = re.compile(r"[,\s;]+")
-
-def _to_floats(txt: Optional[str]) -> List[float]:
-    """Parse a whitespace/comma/semicolon separated string into floats."""
-    if not txt:
-        return []
-    vals: List[float] = []
-    for tok in _NUM_SPLIT.split(txt.strip()):
-        if not tok:
-            continue
-        try:
-            vals.append(float(tok))
-        except ValueError:
-            try:
-                vals.append(float(tok.replace(',', '.')))
-            except Exception:
-                pass
-    return vals
-
-def _local(tag: str) -> str:
-    """Strip XML namespace."""
-    return tag.split('}', 1)[-1] if '}' in tag else tag
-
-def _elem_text(e: Optional[ET.Element]) -> str:
-    
-    return "" if e is None else (e.text or "")
-
-def _is_monotonic_increasing(xs: List[float]) -> bool:
-    
-    return all(xs[i] < xs[i+1] for i in range(len(xs)-1))
-
-# ---------- name resolution with parent map ----------
-NAME_TAGS = {
-    "RecordName", "TraceName", "SeriesName", "Label",
-    "DetectorName", "SampleName", "Name"
-}
-
-def _collect_parent_map(root: ET.Element) -> dict:
-    """Build {child: parent} so we can walk upward with stdlib ElementTree."""
-    parent_of = {}
-    stack = [root]
-    while stack:
-        p = stack.pop()
-        for c in list(p):
-            parent_of[c] = p
-            stack.append(c)
-    return parent_of
-
-def _find_name_down(node: ET.Element) -> Optional[str]:
-    """Search downward (subtree) for any naming tag."""
-    for tag in NAME_TAGS:
-        f = node.find(f".//{tag}")
-        if f is not None and f.text and f.text.strip():
-            return f.text.strip()
-    return None
-
-def _guess_name(node: ET.Element, parent_of: dict, fallback: str) -> str:
-    """
-    Choose a human-readable label by searching:
-      1) Downward within 'node'
-      2) Upward through ancestors (up to 5 levels), then downward within each
-    """
-    name = _find_name_down(node)
-    if name:
-        return name
-    steps, cur = 0, node
-    while cur in parent_of and steps < 5:
-        cur = parent_of[cur]
-        steps += 1
-        name = _find_name_down(cur)
-        if name:
-            return name
-    return fallback
-
-# ---------- Pattern A: sibling arrays (<Wavelengths>, <Intensities>) ----------
-WAVEL_TAGS = {"Wavelengths", "Wavelength", "X", "XAxis", "WL"}
-INTENS_TAGS = {"Intensities", "Intensity", "Y", "YAxis", "Data", "Values"}
-
-def _first_child_by_tag_set(parent: ET.Element, tagset: set) -> Optional[ET.Element]:
-    
-    for ch in list(parent):
-        if _local(ch.tag) in tagset:
-            return ch
-    return None
-
-def _extract_pattern_a(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
-    
-    spectra: List[Tuple[str, List[float], List[float]]] = []
-    for node in root.iter():
-        w0 = _first_child_by_tag_set(node, WAVEL_TAGS)
-        y0 = _first_child_by_tag_set(node, INTENS_TAGS)
-
-        # If not found directly, try one level deeper
-        if w0 is None or y0 is None:
-            for child in list(node):
-                w0 = w0 or _first_child_by_tag_set(child, WAVEL_TAGS)
-                y0 = y0 or _first_child_by_tag_set(child, INTENS_TAGS)
-                if w0 is not None and y0 is not None:
-                    node = child
-                    break
-
-        if w0 is None or y0 is None:
-            continue
-
-        X = _to_floats(_elem_text(w0))
-        Y = _to_floats(_elem_text(y0))
-        if len(X) >= 4 and len(X) == len(Y):
-            fallback = "Trace"
-            name = _guess_name(node, parent_of, fallback)
-            # disambiguate duplicates
-            existing = [n for (n, _, _) in spectra]
-            if name in existing:
-                k = 2
-                nn = f"{name} ({k})"
-                while nn in existing:
-                    k += 1
-                    nn = f"{name} ({k})"
-                name = nn
-            spectra.append((name, X, Y))
-    return spectra
-
-# ---------- Pattern B: per-point children (<Point><X>..</X><Y>..</Y></Point>) ----------
-def _leaf_numeric_map(elem: ET.Element) -> dict:
-    """
-    For a 'point' element, return {local_tag: float_value} for all numeric leaves under it.
-    If a tag appears multiple times, keep the first.
-    """
-    out = {}
-    for leaf in elem.iter():
-        if list(leaf):  # has children → not a leaf
-            continue
-        t = _local(leaf.tag)
-        val = _elem_text(leaf).strip()
-        if not val:
-            continue
-        try:
-            f = float(val)
-        except ValueError:
-            try:
-                f = float(val.replace(',', '.'))
-            except Exception:
-                continue
-        if t not in out:
-            out[t] = f
-    return out
-
-def _extract_pattern_b(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
-    
-    spectra: List[Tuple[str, List[float], List[float]]] = []
-    for node in root.iter():
-        kids = list(node)
-        if len(kids) < 8:   # need enough points to be a spectrum
-            continue
-
-        # Build per-child numeric maps and find common numeric tags across all children
-        maps = []
-        common = None
-        ok = True
-        for ch in kids:
-            m = _leaf_numeric_map(ch)
-            if len(m) < 2:
-                ok = False
-                break
-            maps.append(m)
-            common = set(m.keys()) if common is None else (common & set(m.keys()))
-            if not common:
-                ok = False
-                break
-
-        if not ok or not common or len(common) < 2:
-            continue
-
-        tags = sorted(common)
-        built_any = False
-        for x_tag, y_tag in combinations(tags, 2):
-            X = [m[x_tag] for m in maps]
-            Y = [m[y_tag] for m in maps]
-            if len(X) == len(Y) and _is_monotonic_increasing(X):
-                fallback = _local(node.tag)
-                name = _guess_name(node, parent_of, fallback)
-                # disambiguate duplicates
-                existing = [n for (n, _, _) in spectra]
-                base, k = name, 2
-                while name in existing:
-                    name = f"{base} ({k})"; k += 1
-                spectra.append((name, X, Y))
-                built_any = True
-        # keep scanning; there may be multiple blocks elsewhere
-    return spectra
-
-# ---------- public loader ----------
-def read_gxz_to_dataframe(path: str) -> pd.DataFrame:
-    """
-    Read a FelixGX .gxz (GZIPped XML) and return a DataFrame indexed by wavelength (X)
-    with one column per spectrum. Supports both array-sibling and per-point layouts.
-    """
-    # Decompress + parse
-    with gzip.open(path, 'rb') as g:
-        xml_bytes = g.read()
-    try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError:
-        xml_str = xml_bytes.decode('utf-8', errors='replace').lstrip('\ufeff')
-        root = ET.fromstring(xml_str)
-
-    # Build parent map once for name resolution
-    parent_of = _collect_parent_map(root)
-
-    # Try both extraction strategies
-    spectra = _extract_pattern_a(root, parent_of)
-    if not spectra:
-        spectra = _extract_pattern_b(root, parent_of)
-
-    print(f"[GXZ] spectra found (combined): {len(spectra)}")
-    if not spectra:
-        raise ValueError("No spectra found. If needed, we can tweak tag detection for your export preset.")
-
-    # Build DataFrame
-    frames = []
-    for name, X, Y in spectra:
-        fr = pd.DataFrame({"X": X, name: Y})
-        frames.append(fr)
-
-    data = frames[0]
-    for fr in frames[1:]:
-        data = data.merge(fr, on="X", how="outer")
-
-    data = data.sort_values("X").drop_duplicates("X").set_index("X")
-
-    # Drop lamp-correction helper channels if they slipped in
-    drop_mask = data.columns.str.contains(r"ExCorr|RCQC", case=False, na=False)
-    data = data.loc[:, ~drop_mask]
-
-    # Prefer corrected PMT traces first (ordering convenience)
-    cols = list(data.columns)
-    corrected = [c for c in cols if ('d1' in c.lower() and 'cor' in c.lower()) or ('[cor]' in c.lower())]
-    others = [c for c in cols if c not in corrected]
-    if corrected:
-        data = data[[*corrected, *others]]
-
-    return data
-# =================== end .gxz support block =====================
+settingsFile = 'tools/settings.yaml'
 
 
 class dataTools :
@@ -323,6 +76,244 @@ class dataTools :
 
     def loadGXZ(self, folder: str, file: str) -> pd.DataFrame:
         
+        def _to_floats(txt: Optional[str]) -> List[float]:
+            _NUM_SPLIT = re.compile(r"[,\s;]+")
+            """Parse a whitespace/comma/semicolon separated string into floats."""
+            if not txt:
+                return []
+            vals: List[float] = []
+            for tok in _NUM_SPLIT.split(txt.strip()):
+                if not tok:
+                    continue
+                try:
+                    vals.append(float(tok))
+                except ValueError:
+                    try:
+                        vals.append(float(tok.replace(',', '.')))
+                    except Exception:
+                        pass
+            return vals
+
+        def _local(tag: str) -> str:
+            """Strip XML namespace."""
+            return tag.split('}', 1)[-1] if '}' in tag else tag
+
+        def _elem_text(e: Optional[ET.Element]) -> str:
+            
+            return "" if e is None else (e.text or "")
+
+        def _is_monotonic_increasing(xs: List[float]) -> bool:
+            
+            return all(xs[i] < xs[i+1] for i in range(len(xs)-1))
+
+        def _collect_parent_map(root: ET.Element) -> dict:
+            """Build {child: parent} so we can walk upward with stdlib ElementTree."""
+            parent_of = {}
+            stack = [root]
+            while stack:
+                p = stack.pop()
+                for c in list(p):
+                    parent_of[c] = p
+                    stack.append(c)
+            return parent_of
+
+        def _find_name_down(node: ET.Element) -> Optional[str]:
+            NAME_TAGS = {
+                "RecordName", "TraceName", "SeriesName", "Label",
+                "DetectorName", "SampleName", "Name"
+            }
+            """Search downward (subtree) for any naming tag."""
+            for tag in NAME_TAGS:
+                f = node.find(f".//{tag}")
+                if f is not None and f.text and f.text.strip():
+                    return f.text.strip()
+            return None
+
+        def _guess_name(node: ET.Element, parent_of: dict, fallback: str) -> str:
+            """
+            Choose a human-readable label by searching:
+            1) Downward within 'node'
+            2) Upward through ancestors (up to 5 levels), then downward within each
+            """
+            name = _find_name_down(node)
+            if name:
+                return name
+            steps, cur = 0, node
+            while cur in parent_of and steps < 5:
+                cur = parent_of[cur]
+                steps += 1
+                name = _find_name_down(cur)
+                if name:
+                    return name
+            return fallback
+
+        def _first_child_by_tag_set(parent: ET.Element, tagset: set) -> Optional[ET.Element]:
+            
+            for ch in list(parent):
+                if _local(ch.tag) in tagset:
+                    return ch
+            return None
+
+        def _extract_pattern_a(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
+            
+            WAVEL_TAGS = {"Wavelengths", "Wavelength", "X", "XAxis", "WL"}
+            INTENS_TAGS = {"Intensities", "Intensity", "Y", "YAxis", "Data", "Values"}
+            
+            spectra: List[Tuple[str, List[float], List[float]]] = []
+            for node in root.iter():
+                w0 = _first_child_by_tag_set(node, WAVEL_TAGS)
+                y0 = _first_child_by_tag_set(node, INTENS_TAGS)
+
+                # If not found directly, try one level deeper
+                if w0 is None or y0 is None:
+                    for child in list(node):
+                        w0 = w0 or _first_child_by_tag_set(child, WAVEL_TAGS)
+                        y0 = y0 or _first_child_by_tag_set(child, INTENS_TAGS)
+                        if w0 is not None and y0 is not None:
+                            node = child
+                            break
+
+                if w0 is None or y0 is None:
+                    continue
+
+                X = _to_floats(_elem_text(w0))
+                Y = _to_floats(_elem_text(y0))
+                if len(X) >= 4 and len(X) == len(Y):
+                    fallback = "Trace"
+                    name = _guess_name(node, parent_of, fallback)
+                    # disambiguate duplicates
+                    existing = [n for (n, _, _) in spectra]
+                    if name in existing:
+                        k = 2
+                        nn = f"{name} ({k})"
+                        while nn in existing:
+                            k += 1
+                            nn = f"{name} ({k})"
+                        name = nn
+                    spectra.append((name, X, Y))
+            return spectra
+
+        # ---------- Pattern B: per-point children (<Point><X>..</X><Y>..</Y></Point>) ----------
+        def _leaf_numeric_map(elem: ET.Element) -> dict:
+            """
+            For a 'point' element, return {local_tag: float_value} for all numeric leaves under it.
+            If a tag appears multiple times, keep the first.
+            """
+            out = {}
+            for leaf in elem.iter():
+                if list(leaf):  # has children → not a leaf
+                    continue
+                t = _local(leaf.tag)
+                val = _elem_text(leaf).strip()
+                if not val:
+                    continue
+                try:
+                    f = float(val)
+                except ValueError:
+                    try:
+                        f = float(val.replace(',', '.'))
+                    except Exception:
+                        continue
+                if t not in out:
+                    out[t] = f
+            return out
+
+        def _extract_pattern_b(root: ET.Element, parent_of: dict) -> List[Tuple[str, List[float], List[float]]]:
+            
+            spectra: List[Tuple[str, List[float], List[float]]] = []
+            for node in root.iter():
+                kids = list(node)
+                if len(kids) < 8:   # need enough points to be a spectrum
+                    continue
+
+                # Build per-child numeric maps and find common numeric tags across all children
+                maps = []
+                common = None
+                ok = True
+                for ch in kids:
+                    m = _leaf_numeric_map(ch)
+                    if len(m) < 2:
+                        ok = False
+                        break
+                    maps.append(m)
+                    common = set(m.keys()) if common is None else (common & set(m.keys()))
+                    if not common:
+                        ok = False
+                        break
+
+                if not ok or not common or len(common) < 2:
+                    continue
+
+                tags = sorted(common)
+                built_any = False
+                for x_tag, y_tag in combinations(tags, 2):
+                    X = [m[x_tag] for m in maps]
+                    Y = [m[y_tag] for m in maps]
+                    if len(X) == len(Y) and _is_monotonic_increasing(X):
+                        fallback = _local(node.tag)
+                        name = _guess_name(node, parent_of, fallback)
+                        # disambiguate duplicates
+                        existing = [n for (n, _, _) in spectra]
+                        base, k = name, 2
+                        while name in existing:
+                            name = f"{base} ({k})"; k += 1
+                        spectra.append((name, X, Y))
+                        built_any = True
+                # keep scanning; there may be multiple blocks elsewhere
+            return spectra
+
+        # ---------- public loader ----------
+        def read_gxz_to_dataframe(path: str) -> pd.DataFrame:
+            """
+            Read a FelixGX .gxz (GZIPped XML) and return a DataFrame indexed by wavelength (X)
+            with one column per spectrum. Supports both array-sibling and per-point layouts.
+            """
+            # Decompress + parse
+            with gzip.open(path, 'rb') as g:
+                xml_bytes = g.read()
+            try:
+                root = ET.fromstring(xml_bytes)
+            except ET.ParseError:
+                xml_str = xml_bytes.decode('utf-8', errors='replace').lstrip('\ufeff')
+                root = ET.fromstring(xml_str)
+
+            # Build parent map once for name resolution
+            parent_of = _collect_parent_map(root)
+
+            # Try both extraction strategies
+            spectra = _extract_pattern_a(root, parent_of)
+            if not spectra:
+                spectra = _extract_pattern_b(root, parent_of)
+
+            print(f"[GXZ] spectra found (combined): {len(spectra)}")
+            if not spectra:
+                raise ValueError("No spectra found. If needed, we can tweak tag detection for your export preset.")
+
+            # Build DataFrame
+            frames = []
+            for name, X, Y in spectra:
+                fr = pd.DataFrame({"X": X, name: Y})
+                frames.append(fr)
+
+            data = frames[0]
+            for fr in frames[1:]:
+                data = data.merge(fr, on="X", how="outer")
+
+            data = data.sort_values("X").drop_duplicates("X").set_index("X")
+
+            # Drop lamp-correction helper channels if they slipped in
+            drop_mask = data.columns.str.contains(r"ExCorr|RCQC", case=False, na=False)
+            data = data.loc[:, ~drop_mask]
+
+            # Prefer corrected PMT traces first (ordering convenience)
+            cols = list(data.columns)
+            corrected = [c for c in cols if ('d1' in c.lower() and 'cor' in c.lower()) or ('[cor]' in c.lower())]
+            others = [c for c in cols if c not in corrected]
+            if corrected:
+                data = data[[*corrected, *others]]
+
+            return data
+        
         path = str(Path(folder) / file)
         try:
             data = read_gxz_to_dataframe(path)
@@ -332,12 +323,12 @@ class dataTools :
             data = pd.DataFrame()
         return data
 
-    def createSpectra(self,data,Runs,Buffer='None',TyrScale=0) :
+    def createSpectra(self,data,Runs,Buffer='None',CamScale=0) :
         
         spectra = data.copy(deep=True)
         if Buffer != 'None':
             spectra = spectra.sub(spectra[Buffer], axis=0)
-        if TyrScale > 0:
+        if CamScale > 0:
             try:
                 with open(settingsFile, 'r') as stream:
                     settings = yaml.safe_load(stream) or {}
@@ -356,9 +347,9 @@ class dataTools :
                             scaling.append(0)
                     cam = Cam.iloc[:, 0]  # first Y column
                     for idx, name in enumerate(spectra.columns):
-                        spectra[name] = spectra[name] - TyrScale * scaling[idx] * cam
+                        spectra[name] = spectra[name] - CamScale * scaling[idx] * cam / 60
                 else:
-                    print("Calmodulin data not found in settings. Skipping tyrosine removal.")
+                    print("Calmodulin data not found in settings. Skipping calmodulin tyrosine removal.")
             except Exception as e:
                 print(f"CaM subtraction skipped due to error: {e}")
         # Keep only selected runs, but preserve order
@@ -415,6 +406,27 @@ class analysisTools :
 
         pass
     
+    def LoadTitration(self,data,file) :
+        try:
+            if file.lower().endswith('.csv'):
+                titration = pd.read_csv(file)
+            elif file.lower().endswith('.xlsx'):
+                titration = pd.read_excel(file)
+            else:
+                titration = None
+                return
+        except Exception as e:
+            titration = None
+        if data.shape[1] <= titration.shape[0]:
+            columns = list()
+            for idx, col in enumerate(data.columns) :
+                try :
+                    columns.append(str(float(titration.values[idx]))+' '+titration.columns[0])
+                except :
+                    columns.append(str(titration.values[idx][0]))
+            data.columns = columns
+        return data
+    
     def ExtractTitration(self,data) :
         
         if any('D1' in col for col in data.columns):
@@ -462,11 +474,14 @@ class analysisTools :
             model = SkewedGaussianModel()
             params = model.guess(y_vals, x=x_vals)
             result = model.fit(y_vals, params, x=x_vals)
+            x_fine = np.linspace(x_vals.min(), x_vals.max(), int((x_vals.max()-x_vals.min())*20))
+            y_fine = model.eval(result.params, x=x_fine)
+
             plt.scatter(data.index.to_numpy(), data[col].to_numpy(), s=20)
-            plt.plot(x_vals, result.best_fit, linewidth=2, label=f'{col}')
+            plt.plot(x_fine, y_fine, linewidth=2, label=f'{col}')
             
             integratedAreas.append(result.params['amplitude'].value)
-            peakValues.append(x_vals[np.argmax(result.best_fit)])
+            peakValues.append(x_fine[np.argmax(y_fine)])
 
         # Finalize plot
         plt.xlabel('Wavelength (nm)',fontsize=fontsize)
@@ -515,12 +530,10 @@ class UI :
         
         self.BufferNames = ['None']
         self.Names = ['']
-        self.titration = None
 
         self.FoldersLabel = '-------Folders-------'
         self.FilesLabel = '-------Files-------'
         self.settingsFile = settingsFile
-        
         
         try:
             with open(self.settingsFile, 'r') as stream:
@@ -528,15 +541,15 @@ class UI :
         except FileNotFoundError:
             settings = {'folders': {'data': str(Path.cwd())}, 'files': {}}
 
-
         if os.path.isdir(settings['folders']['data']) :
             self.cwd = settings['folders']['data']
         else :
             self.cwd = str(Path(os.getcwd()))
 
-        out = ipw.Output()
-        anout = ipw.Output()
-
+        out1 = ipw.Output()
+        out2 = ipw.Output()
+        out3 = ipw.Output()
+        
         def go_to_address(address):
             address = Path(address)
             if address.is_dir():
@@ -593,35 +606,40 @@ class UI :
         up_button.on_click(parent)
             
         def load(b):
-            with out :
+            with out1 :
                 clear_output()
-            with anout :
+                display(ipw.Box([Filter,Update_RunList,CamScale]))
+                display(ipw.Box([TitrationFile,UpdateTitration]))
+                display(ipw.Box([Runs_Selected,Plot]))
+                display(ipw.Box([Buffer]))
+            with out2 :
                 clear_output()
-            self.Buffer.value = 'None'
-            self.Runs_Selected.value = []
+            with out3 :
+                clear_output()
+            Buffer.value = 'None'
+            Runs_Selected.value = []
             suffix = (SelectFile.value or '').lower()
             if suffix.endswith('.gxz'):
-                self.data = dt.loadGXZ(folderField.value, SelectFile.value)
+                data = dt.loadGXZ(folderField.value, SelectFile.value)
             else:
-                self.data = dt.loadText(folderField.value, SelectFile.value)
+                data = dt.loadText(folderField.value, SelectFile.value)
             self.filename = SelectFile.value
+            self.data = data
             RunList()
-            Upload_Titration.value = ()
-            Upload_Titration._counter=0
         load_button = ipw.Button(description='Load',layout=Layout(width='10%'))
         load_button.on_click(load)
 
         def RunList():
             self.Runs = list(self.data.columns.values.astype(str))
-            Runs = [k for k in self.Runs if self.Filter.value in k]
-            self.Runs_Selected.options = Runs
+            Runs = [k for k in self.Runs if Filter.value in k]
+            Runs_Selected.options = Runs
             Runs.insert(0,'None')
-            self.Buffer.options = Runs
+            Buffer.options = Runs
 
-        self.Filter = ipw.Text(
+        Filter = ipw.Text(
             value='',
             placeholder='Type something',
-            description='Filter:',
+            description='Filter',
             style = {'description_width': '150px'},
             disabled=False
         )
@@ -630,65 +648,34 @@ class UI :
             RunList()
         Update_RunList = ipw.Button(description="Update run list")
         Update_RunList.on_click(Update_RunList_Clicked)
-
-        # Create upload widget
-        Upload_Titration = ipw.FileUpload(
-            accept='.csv, .xlsx',  # allowed file types
-            multiple=False,
-            description='Select Titration File',
-            layout=ipw.Layout(width='170px')
-        )
         
-        TyrScale = ipw.BoundedFloatText(
+        CamScale = ipw.BoundedFloatText(
             value=0.0,
             min=0.0,
             max=10,
             step=0.01,
-            description='Tyrosine Subtraction:',
+            description='CaM Subtraction:',
             layout=ipw.Layout(width='200px'),
             style={'description_width': '120px'}
         )
 
-        def on_uploadTitration_change(change):
-            data = self.data
-            titration = self.titration
-            if not Upload_Titration.value:
-                print("⚠️ No file uploaded.")
-                return
-            for file_info in Upload_Titration.value:
-                filename = file_info['name']
-                content = file_info['content']
-                print(f"📂 Uploaded: {filename}")
-                try:
-                    if filename.lower().endswith('.csv'):
-                        titration = pd.read_csv(io.BytesIO(content))
-                    elif filename.lower().endswith('.xlsx'):
-                        titration = pd.read_excel(io.BytesIO(content))
-                    else:
-                        print("❌ Unsupported file type.")
-                        titration = None
-                        return
-                    
-                    print("✅ File loaded successfully!")
-                except Exception as e:
-                    print(f"❌ Error reading file: {e}")
-                    titration = None
-            self.titration = titration
-            if data.shape[1] == titration.shape[0]:
-                columns = list()
-                for col in titration.iloc[:,0] :
-                    try :
-                        float(col)
-                        columns.append(str(col)+' '+titration.columns[0])
-                    except :
-                        columns.append(col)
-                data.columns = columns
-            else:
-                print('Titration data length does not match number of runs.')
+        def UpdateTitration_Clicked(b):
+            self.data = at.LoadTitration(self.data,TitrationFile.value)   
             RunList()
-        Upload_Titration.observe(on_uploadTitration_change, names='value')
+        UpdateTitration = ipw.Button(
+            description="Update Titration",
+            )
+        UpdateTitration.on_click(UpdateTitration_Clicked)
+        
+        TitrationFile = ipw.Text(
+            value=settings['files']['titration'],
+            description='Titration File',
+            style = {'description_width': '150px'},
+            layout=Layout(width='40%'),
+            disabled=False
+        )
 
-        self.Runs_Selected = ipw.SelectMultiple(
+        Runs_Selected = ipw.SelectMultiple(
             options='',
             style = {'width': '100px','description_width': '150px'},
             rows=20,
@@ -697,7 +684,7 @@ class UI :
             disabled=False
         )
 
-        self.Buffer = ipw.Dropdown(
+        Buffer = ipw.Dropdown(
             options=self.BufferNames,
             value='None',
             layout=Layout(width='70%'),
@@ -707,16 +694,16 @@ class UI :
         )
 
         def Plot_Clicked(b):
-            with out :
+            with out2 :
                 data = self.data
                 clear_output()
-                spectra = dt.createSpectra(data,self.Runs_Selected.value,Buffer=self.Buffer.value,TyrScale=TyrScale.value)
+                spectra = dt.createSpectra(data,Runs_Selected.value,Buffer=Buffer.value,CamScale=CamScale.value)
                 self.fig = dt.plot(spectra)
                 display(ipw.Box([SavePlot,SpectraToClipboard,Plot2D]))
                 display(ipw.Box([Integrate,Fit]))
                 display(LowLim)
                 display(UpLim)
-            with anout :
+            with out3 :
                 clear_output()
             LowLim.max = max(spectra.index)
             LowLim.min = min(spectra.index)
@@ -729,7 +716,7 @@ class UI :
         Plot.on_click(Plot_Clicked)
         
         def Plot2d_Clicked(b):
-            with anout :
+            with out3 :
                 clear_output()
                 dt.plot2D(self.spectra)
         Plot2D = ipw.Button(description="Plot 2D")
@@ -737,7 +724,7 @@ class UI :
 
         def Integrate_clicked(b):
             spectra = self.spectra.copy(deep=True)
-            with anout :
+            with out3 :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
                 self.integratedValues = at.Integrate(spectra, limits)
@@ -747,7 +734,7 @@ class UI :
         
         def Fit_clicked(b):
             spectra = self.spectra.copy(deep=True)
-            with anout :
+            with out3 :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
                 self.fitAnalysis = at.Fit(spectra, limits)
@@ -810,12 +797,11 @@ class UI :
         display(ipw.HBox([folderField]))
         display(ipw.HBox([SelectFolder,up_button]))
         display(ipw.HBox([SelectFile,load_button]))
-        display(ipw.Box([self.Filter,Update_RunList,Upload_Titration,TyrScale]))
-        display(ipw.Box([self.Runs_Selected,Plot]))
-        display(ipw.Box([self.Buffer]))
 
-        display(out)
-        display(anout)
+
+        display(out1)
+        display(out2)
+        display(out3)
 
     def get_folder_contents(self,folder):
 

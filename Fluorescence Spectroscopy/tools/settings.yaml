@@ -1,4 +1,7 @@
 files:
   calmodulin: tools\calmodulin.csv
+  titration: tools\titration.csv
 folders:
-  data: C:\Users\larue\Chapman University\LaRue CatLab - Data\2025\2025.03.04
+  data: C:\Users\larue\Chapman University\LaRue CatLab - Data\2026\2026.01.27\CaM
+CaM:
+  scale: 60
