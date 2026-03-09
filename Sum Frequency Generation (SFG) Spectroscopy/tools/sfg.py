@@ -2,21 +2,22 @@ import os
 from os import listdir
 from os.path import isfile, join
 import sys
+from matplotlib import colors
 import numpy as np
 from pandas import DataFrame as df
 import matplotlib.pyplot as plt
 import cmath
 import yaml
 import re
+import sif_parser
 from lmfit import model, Model
 from lmfit.models import GaussianModel, SkewedGaussianModel, VoigtModel, ConstantModel, LinearModel, QuadraticModel, PolynomialModel
 from pathlib import Path
-import plotly.express as px
 import plotly.graph_objects as go
 import ipywidgets as ipw
 from ipywidgets import Button, Layout
 from IPython.display import clear_output
-from . import sif_open as sif
+
 
 settingsFile = 'tools/settings.yaml'
 
@@ -86,7 +87,6 @@ class dataTools :
     
         FolderPath = Parameters['FolderPath']
         FileName = Parameters['FileName']
-
         if FileName.endswith('.ibw') :
             d = binarywave.load(FolderPath + '/' + FileName)
             y = np.transpose(d['wave']['wData'])
@@ -113,28 +113,22 @@ class dataTools :
             z = np.arange(Start[1],Start[1]+y.shape[0]*Delta[1]-Delta[1]/2,Delta[1])
             print('Igor text data loaded')
         elif FileName.endswith('sif') :
-            FileData = sif.xr_open(FolderPath + '/' + FileName)
-            y = FileData.values[:,0,:]
-            x = [i for i in range(len(np.transpose(y)))]
+            y, info = sif_parser.np_open(FolderPath + '/' + FileName)
+            y = y[:,0,:]
             z = [i+1 for i in range(len(y))]
-            
-            try :
-                FileData.attrs['WavelengthCalibration0']
-                FileData.attrs['WavelengthCalibration1']
-                FileData.attrs['WavelengthCalibration2']
-                FileData.attrs['WavelengthCalibration3']
-            except :
-                print('Warning: Wavelength calibration not found')
-            else :
-                c0 = FileData.attrs['WavelengthCalibration0']
-                c1 = FileData.attrs['WavelengthCalibration1']
-                c2 = FileData.attrs['WavelengthCalibration2']
-                c3 = FileData.attrs['WavelengthCalibration3']
-                for i in x :
-                    x[i] = c0 + c1*i + c2*1**2 + c3*i**3
-                x = np.array(x)
-                x = 1e7 / x - 12500
-            
+            cal = info.get("Calibration_data") or info.get("Calibration_data_for_frame_1")
+            if cal is None:
+                raise ValueError("No embedded calibration found in this SIF (no Calibration_data keys).")
+            a0, a1, a2, a3 = cal
+            N = y.shape[-1]
+            pixels = np.arange(N)
+            x = (
+                a0
+                + a1 * pixels
+                + a2 * pixels**2
+                + a3 * pixels**3
+            )
+            x = 1e7 / x - 12500
             try :
                 Frame = Parameters['Heating']['Frame']
                 Temperature = Parameters['Heating']['Temperature']
@@ -147,7 +141,6 @@ class dataTools :
                 idx = np.array(z)
                 z = FitResults.eval(x=idx)
                 z = np.round(z,1)
-        
         Data = df(np.transpose(y),index=x,columns=z)
             
         return Data
@@ -388,7 +381,9 @@ class analysisTools :
                 if kwarg == 'fit_x':
                     fit_x = kwargs[kwarg]
         else :
-            fit_x = x
+            fit_x = self.data.index.values
+        
+        all = {}
         
         for idx, Column in enumerate(data) :
             
@@ -501,31 +496,25 @@ class analysisTools :
 
         if ShowFits :
             for Column in data2Fit :
-
                 plt.figure(figsize = [12,4])
-
                 plt.subplot(1, 2, 1)
                 plt.plot(data.index, data[Column],'k.', label='Data')
                 plt.plot(fitsData.index, fitsData[Column], 'r-', label='Fit')
                 plt.xlabel('WaveNumber (cm$^{-1}$)'), plt.ylabel('Intensity (au)')
                 plt.title('Temperature: '+str(Column)+' K')
-
                 plt.subplot(1, 2, 2)
                 plt.plot(data2Fit.index, data2Fit[Column],'k.', label='Data')
                 plt.plot(fits.index, fits[Column], 'r-', label='Fit')
                 plt.xlabel('WaveNumber (cm$^{-1}$)'), plt.ylabel('Intensity (au)')
                 if 'xRange' in par['Fit'] :
                     plt.xlim(par['Fit']['xRange'][0],par['Fit']['xRange'][1])
-
                 plt.legend(frameon=False, loc='upper center', bbox_to_anchor=(1.2, 1), ncol=1)
                 plt.show()
-
                 Peaks = list()
                 for Parameter in fitsParameters.index :
                     Name = Parameter.split('_')[0]
                     if Name not in Peaks :
                         Peaks.append(Name)
-
                 string = ''
                 for Peak in Peaks :
                     if 'assignment' in par['Fit']['Models'][Peak] :
@@ -545,28 +534,32 @@ class analysisTools :
         
         # Plot 2D Data & Fits
         
-        plt.figure(figsize = [8,12])
-        
-        plt.subplot(2, 1, 1)
-        x = data.index.values
-        y = data.columns.values
-        z = np.transpose(data.values)
-        plt.ylabel('Temperature (K)', fontsize=16)
-        plt.tick_params(axis = 'both', which = 'major', labelsize = 16)
-        plt.title('Data: '+par['FileName'], fontsize=16)
-        pcm = plt.pcolor(x, y, z, cmap='jet', shading='auto')
-        
-        plt.subplot(2, 1, 2)
-        x = fitsData.index.values
-        y = fitsData.columns.values
-        z = np.transpose(fitsData.values)
-        plt.xlabel('Wavenumber (cm$^-$$^1$)', fontsize=16)
-        plt.ylabel('Temperature (K)', fontsize=16)
-        plt.tick_params(axis = 'both', which = 'major', labelsize = 16)
-        plt.title('Fits: '+par['FileName'], fontsize=16)
-        pcm = plt.pcolor(x, y, z, cmap='jet', shading='auto')
-        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=[8, 12], sharey=True)
+        # --- Data subplot ---
+        x1 = data.index.values
+        y1 = data.columns.values
+        z1 = np.transpose(data.values)
+        # --- Fits subplot ---
+        x2 = fitsData.index.values
+        y2 = fitsData.columns.values
+        z2 = np.transpose(fitsData.values)
+        # Compute a common z-range across BOTH arrays (ignoring NaNs)
+        vmin = np.nanmin([np.nanmin(z1), np.nanmin(z2)])
+        vmax = np.nanmax([np.nanmax(z1), np.nanmax(z2)])
+        norm = colors.Normalize(vmin=vmin, vmax=vmax)
+        pcm1 = ax1.pcolor(x1, y1, z1, cmap='jet', shading='auto', norm=norm)
+        ax1.set_ylabel('Temperature (K)', fontsize=16)
+        ax1.set_title('Data: ' + par['FileName'], fontsize=16)
+        ax1.tick_params(axis='both', which='major', labelsize=16)
+        pcm2 = ax2.pcolor(x2, y2, z2, cmap='jet', shading='auto', norm=norm)
+        ax2.set_xlabel('Wavenumber (cm$^{-1}$)', fontsize=16)
+        ax2.set_ylabel('Temperature (K)', fontsize=16)
+        ax2.set_title('Fits: ' + par['FileName'], fontsize=16)
+        ax2.tick_params(axis='both', which='major', labelsize=16)
+        # One shared colorbar (consistent meaning for colors in both plots)
+        cbar = fig.colorbar(pcm1, ax=[ax1, ax2], pad=0.02)
         plt.show()
+
         
         # Plot Trends
         
@@ -587,6 +580,7 @@ class analysisTools :
 
         Results = {}
         Results['fits'] = fits
+        Results['data2Fit'] = data2Fit
         Results['fitsData'] = fitsData
         Results['fitsComponents'] = fitsComponents
         Results['fitsParameters'] = fitsParameters
@@ -611,6 +605,7 @@ class UI :
             
         if os.path.isdir(settings['folders']['current']) :
             self.cwd = settings['folders']['current']
+            print(self.cwd)
         else :
             self.cwd = str(Path(os.getcwd()))
     
@@ -701,6 +696,10 @@ class UI :
         ShowData = ipw.Button(description="Show Data")
         ShowData.on_click(ShowData_Clicked)
         
+        def Save(data) :
+            with open('output.yaml', 'w') as yaml_file:
+                yaml.dump(data, yaml_file,default_flow_style=False)
+        
         def FitData_Clicked(b) :
             with out :
                 clear_output(True)
@@ -717,6 +716,10 @@ class UI :
                     data.to_clipboard()
                 CopyData = ipw.Button(description="Copy Data")
                 CopyData.on_click(CopyData_Clicked)
+                def CopyFitData_Clicked(b) :
+                    self.fits['data2Fit'].to_clipboard()
+                CopyFitData = ipw.Button(description="Copy Fit Data")
+                CopyFitData.on_click(CopyFitData_Clicked)
                 def CopyFits_Clicked(b) :
                     self.fits['fits'].to_clipboard()
                 CopyFits = ipw.Button(description="Copy Fits")
@@ -725,7 +728,7 @@ class UI :
                     self.fits['fitsParameters'].to_clipboard()
                 CopyParameters = ipw.Button(description="Copy Parameters")
                 CopyParameters.on_click(CopyParameters_Clicked)
-                display(ipw.Box([CopyData,CopyFits,CopyParameters]))
+                display(ipw.Box([CopyData,CopyFitData,CopyFits,CopyParameters]))
         FitData = ipw.Button(description="Fit Data")
         FitData.on_click(FitData_Clicked)
         
