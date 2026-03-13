@@ -418,6 +418,8 @@ class analysisTools :
 
         dt = dataTools()
         
+        Results = {}
+        
         print('Data: '+par['FileName'])
         print('Description: '+par['Description'])
         
@@ -445,33 +447,36 @@ class analysisTools :
         
         ##### Fit Data #####
 
-        try :
-            par['Background']['Models']
-        except :
-            data2Fit = data.divide(nonres['Data'],axis=0)
-        else :
-            print('Fitting Background')
-            fitNonres = self.fit(nonres,par['Background'])
-            fitNonres[3][0].plot_fit(xlabel='Wavenumber (cm$^{-1}$)',ylabel='Intensity (au)',title='Non-Resonant Background')
-            nonres['Fit'] = fitNonres[0]
-            data2Fit = data.divide(nonres['Fit'],axis=0)
-
-        if 'xRange' in par['Fit'] :
-            data2Fit = dt.trimData(data2Fit,par['Fit']['xRange'][0],par['Fit']['xRange'][1])
-        
         if 'zRange' in par['Fit'] :
             T_mask = []
             T_mask.append(data.columns<=max(par['Fit']['zRange']))
             T_mask.append(data.columns>=min(par['Fit']['zRange']))
             T_mask = np.all(T_mask, axis=0)
-            data2Fit = data2Fit.T[T_mask].T
+            data = data.T[T_mask].T
         
-        fits, fitsComponents, fitsParameters, fitsResults = self.fit(data2Fit,par['Fit'])
-        
-        if 'Fit' in nonres :
-            fitsData = fits.multiply(nonres['Fit'],axis=0)
+        try :
+            par['Background']['Models']
+        except :
+            dataResonant = data.divide(nonres['Data'],axis=0)
         else :
-            fitsData = fits.multiply(nonres['Data'],axis=0)
+            print('Fitting Background')
+            fitNonres = self.fit(nonres,par['Background'])
+            fitNonres[3][0].plot_fit(xlabel='Wavenumber (cm$^{-1}$)',ylabel='Intensity (au)',title='Non-Resonant Background')
+            nonres['Fit'] = fitNonres[0]
+            dataResonant = data.divide(nonres['Fit'],axis=0)
+        
+        Results['data'] = data
+        Results['dataResonant'] = dataResonant
+        
+        if 'xRange' in par['Fit'] :
+            dataResonant = dt.trimData(dataResonant,par['Fit']['xRange'][0],par['Fit']['xRange'][1])
+        
+        fitsResonant, fitsComponents, fitsParameters, fitsResults = self.fit(dataResonant, par['Fit'])
+        
+        if 'Fit' in nonres:
+            fits = fitsResonant.multiply(nonres['Fit'], axis=0)
+        else:
+            fits = fitsResonant.multiply(nonres['Data'], axis=0)
         
         print('\n'+100*'_')
         
@@ -495,16 +500,16 @@ class analysisTools :
             ShowFits = True
 
         if ShowFits :
-            for Column in data2Fit :
+            for Column in dataResonant :
                 plt.figure(figsize = [12,4])
                 plt.subplot(1, 2, 1)
-                plt.plot(data.index, data[Column],'k.', label='Data')
-                plt.plot(fitsData.index, fitsData[Column], 'r-', label='Fit')
+                plt.plot(data.index, data[Column], 'k.', label='Data')
+                plt.plot(fits.index, fits[Column], 'r-', label='Fit')
                 plt.xlabel('WaveNumber (cm$^{-1}$)'), plt.ylabel('Intensity (au)')
                 plt.title('Temperature: '+str(Column)+' K')
                 plt.subplot(1, 2, 2)
-                plt.plot(data2Fit.index, data2Fit[Column],'k.', label='Data')
-                plt.plot(fits.index, fits[Column], 'r-', label='Fit')
+                plt.plot(dataResonant.index, dataResonant[Column], 'k.', label='Data')
+                plt.plot(fitsResonant.index, fitsResonant[Column], 'r-', label='Fit')
                 plt.xlabel('WaveNumber (cm$^{-1}$)'), plt.ylabel('Intensity (au)')
                 if 'xRange' in par['Fit'] :
                     plt.xlim(par['Fit']['xRange'][0],par['Fit']['xRange'][1])
@@ -540,9 +545,9 @@ class analysisTools :
         y1 = data.columns.values
         z1 = np.transpose(data.values)
         # --- Fits subplot ---
-        x2 = fitsData.index.values
-        y2 = fitsData.columns.values
-        z2 = np.transpose(fitsData.values)
+        x2 = fits.index.values
+        y2 = fits.columns.values
+        z2 = np.transpose(fits.values)
         # Compute a common z-range across BOTH arrays (ignoring NaNs)
         vmin = np.nanmin([np.nanmin(z1), np.nanmin(z2)])
         vmax = np.nanmax([np.nanmax(z1), np.nanmax(z2)])
@@ -559,7 +564,6 @@ class analysisTools :
         # One shared colorbar (consistent meaning for colors in both plots)
         cbar = fig.colorbar(pcm1, ax=[ax1, ax2], pad=0.02)
         plt.show()
-
         
         # Plot Trends
         
@@ -575,13 +579,9 @@ class analysisTools :
                     fig.add_trace(go.Scatter(x=fitsParameters.index,y=fitsParameters[parameter],name=Name,mode='lines+markers'))
             fig.update_layout(xaxis_title='Temperature (K)',yaxis_title=uniqueParameter,legend_title='',width=800,height=400)
             fig.show()
-        
-        ##### Widgets #####
 
-        Results = {}
         Results['fits'] = fits
-        Results['data2Fit'] = data2Fit
-        Results['fitsData'] = fitsData
+        Results['fitsResonant'] = fitsResonant
         Results['fitsComponents'] = fitsComponents
         Results['fitsParameters'] = fitsParameters
         Results['fitsResults'] = fitsResults
@@ -713,22 +713,28 @@ class UI :
                     at = analysisTools(data,parameters)
                 self.fits = at.fitData()
                 def CopyData_Clicked(b) :
-                    data.to_clipboard()
+                    self.fits['data'].to_clipboard()
                 CopyData = ipw.Button(description="Copy Data")
                 CopyData.on_click(CopyData_Clicked)
-                def CopyFitData_Clicked(b) :
-                    self.fits['data2Fit'].to_clipboard()
-                CopyFitData = ipw.Button(description="Copy Fit Data")
-                CopyFitData.on_click(CopyFitData_Clicked)
                 def CopyFits_Clicked(b) :
                     self.fits['fits'].to_clipboard()
                 CopyFits = ipw.Button(description="Copy Fits")
                 CopyFits.on_click(CopyFits_Clicked)
                 def CopyParameters_Clicked(b) :
                     self.fits['fitsParameters'].to_clipboard()
+                def CopyResonantData_Clicked(b) :
+                    self.fits['dataResonant'].to_clipboard()
+                CopyResonantData = ipw.Button(description="Copy Resonant Data")
+                CopyResonantData.on_click(CopyResonantData_Clicked)
+                def CopyResonantFits_Clicked(b) :
+                    self.fits['fitsResonant'].to_clipboard()
+                CopyResonantFits = ipw.Button(description="Copy Resonant Fits")
+                CopyResonantFits.on_click(CopyResonantFits_Clicked)
+                def CopyParameters_Clicked(b) :
+                    self.fits['fitsParameters'].to_clipboard()
                 CopyParameters = ipw.Button(description="Copy Parameters")
                 CopyParameters.on_click(CopyParameters_Clicked)
-                display(ipw.Box([CopyData,CopyFitData,CopyFits,CopyParameters]))
+                display(ipw.Box([CopyData,CopyFits,CopyResonantData,CopyResonantFits,CopyParameters]))
         FitData = ipw.Button(description="Fit Data")
         FitData.on_click(FitData_Clicked)
         
