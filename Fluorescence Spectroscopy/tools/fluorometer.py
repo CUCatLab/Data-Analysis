@@ -618,7 +618,7 @@ class UI :
                 clear_output()
                 display(ipw.Box([Filter,Update_RunList]))
                 display(ipw.Box([TitrationFile,LoadTitration]))
-                display(ipw.Box([CamSubtraction,ConcCorrection,TitrantConcentration,CuvetteVolume]))
+                display(ipw.Box([CamSubtraction,DilutionCorrection,CuvetteVolume]))
                 display(ipw.Box([Runs_Selected,Plot]))
                 display(ipw.Box([Buffer]))
             with out2 :
@@ -680,27 +680,17 @@ class UI :
             max=10,
             step=0.01,
             description='CaM Subtraction',
-            layout=ipw.Layout(width='330px'),
-            style={'description_width': '250px'}
+            layout=ipw.Layout(width='160px',margin='0 0 0 170px'),
+            style={'description_width': '100px'}
         )
         
-        ConcCorrection = ipw.Checkbox(
+        DilutionCorrection = ipw.Checkbox(
             value=False,
-            description='Correct Concentration',
+            description='Correct for Dilution',
             disabled=False,
             indent=False,
             layout=ipw.Layout(width='160px',margin='0 0 0 50px'),
             style={'description_width': '250px'}
-        )
-        
-        TitrantConcentration = ipw.BoundedFloatText(
-            value=50,
-            min=0,
-            max=200,
-            step=1,
-            description='CaM Conc (mM):',
-            layout=ipw.Layout(width='170px'),
-            style={'description_width': '100px'}
         )
         
         CuvetteVolume = ipw.BoundedFloatText(
@@ -708,9 +698,9 @@ class UI :
             min=0,
             max=2000,
             step=1,
-            description='Volume (μL):',
-            layout=ipw.Layout(width='200px'),
-            style={'description_width': '80px'}
+            description='Volume (μL)',
+            layout=ipw.Layout(width='150px'),
+            style={'description_width': '70px'}
         )
 
         Runs_Selected = ipw.SelectMultiple(
@@ -735,7 +725,7 @@ class UI :
             with out2 :
                 data = self.data.copy(deep=True)
                 clear_output()
-                if ConcCorrection.value :
+                if DilutionCorrection.value :
                     data = at.AdjustConcentration(data,CuvetteVolume.value)
                 spectra = dt.createSpectra(data,Runs_Selected.value,Buffer=Buffer.value,CamSubtraction=CamSubtraction.value)
                 self.fig = dt.plot(spectra)
