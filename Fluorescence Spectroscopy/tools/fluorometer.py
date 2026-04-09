@@ -323,12 +323,12 @@ class dataTools :
             data = pd.DataFrame()
         return data
 
-    def createSpectra(self,data,Runs,Buffer='None',CamScale=0) :
+    def createSpectra(self,data,Runs,Buffer='None',CamSubtraction=0) :
         
         spectra = data.copy(deep=True)
         if Buffer != 'None':
             spectra = spectra.sub(spectra[Buffer], axis=0)
-        if CamScale > 0:
+        if CamSubtraction > 0:
             try:
                 with open(settingsFile, 'r') as stream:
                     settings = yaml.safe_load(stream) or {}
@@ -347,7 +347,7 @@ class dataTools :
                             scaling.append(0)
                     cam = Cam.iloc[:, 0]  # first Y column
                     for idx, name in enumerate(spectra.columns):
-                        spectra[name] = spectra[name] - CamScale * scaling[idx] * cam / 60
+                        spectra[name] = spectra[name] - CamSubtraction * scaling[idx] * cam / 60
                 else:
                     print("Calmodulin data not found in settings. Skipping calmodulin tyrosine removal.")
             except Exception as e:
@@ -407,6 +407,7 @@ class analysisTools :
         pass
     
     def LoadTitration(self,data,file) :
+        
         try:
             if file.lower().endswith('.csv'):
                 titration = pd.read_csv(file)
@@ -439,6 +440,13 @@ class analysisTools :
                 except :
                     titration.append(column)
             data.columns = titration
+        return data
+
+    def AdjustConcentration(self,data,volume) :
+        
+        tempData = self.ExtractTitration(data.copy(deep=True))
+        titration = pd.to_numeric(tempData.columns, errors='coerce').fillna(0).astype(int)
+        data *= (volume+titration)/volume
         return data
 
     def Integrate(self, data, limits):
@@ -608,8 +616,9 @@ class UI :
         def load(b):
             with out1 :
                 clear_output()
-                display(ipw.Box([Filter,Update_RunList,CamScale]))
-                display(ipw.Box([TitrationFile,UpdateTitration]))
+                display(ipw.Box([Filter,Update_RunList]))
+                display(ipw.Box([TitrationFile,LoadTitration]))
+                display(ipw.Box([CamSubtraction,ConcCorrection,TitrantConcentration,CuvetteVolume]))
                 display(ipw.Box([Runs_Selected,Plot]))
                 display(ipw.Box([Buffer]))
             with out2 :
@@ -649,23 +658,13 @@ class UI :
         Update_RunList = ipw.Button(description="Update run list")
         Update_RunList.on_click(Update_RunList_Clicked)
         
-        CamScale = ipw.BoundedFloatText(
-            value=0.0,
-            min=0.0,
-            max=10,
-            step=0.01,
-            description='CaM Subtraction:',
-            layout=ipw.Layout(width='200px'),
-            style={'description_width': '120px'}
-        )
-
-        def UpdateTitration_Clicked(b):
+        def LoadTitration_Clicked(b):
             self.data = at.LoadTitration(self.data,TitrationFile.value)   
             RunList()
-        UpdateTitration = ipw.Button(
-            description="Update Titration",
+        LoadTitration = ipw.Button(
+            description="Load Titration",
             )
-        UpdateTitration.on_click(UpdateTitration_Clicked)
+        LoadTitration.on_click(LoadTitration_Clicked)
         
         TitrationFile = ipw.Text(
             value=settings['files']['titration'],
@@ -673,6 +672,45 @@ class UI :
             style = {'description_width': '150px'},
             layout=Layout(width='40%'),
             disabled=False
+        )
+        
+        CamSubtraction = ipw.BoundedFloatText(
+            value=0.0,
+            min=0.0,
+            max=10,
+            step=0.01,
+            description='CaM Subtraction',
+            layout=ipw.Layout(width='330px'),
+            style={'description_width': '250px'}
+        )
+        
+        ConcCorrection = ipw.Checkbox(
+            value=False,
+            description='Correct Concentration',
+            disabled=False,
+            indent=False,
+            layout=ipw.Layout(width='160px',margin='0 0 0 50px'),
+            style={'description_width': '250px'}
+        )
+        
+        TitrantConcentration = ipw.BoundedFloatText(
+            value=50,
+            min=0,
+            max=200,
+            step=1,
+            description='CaM Conc (mM):',
+            layout=ipw.Layout(width='170px'),
+            style={'description_width': '100px'}
+        )
+        
+        CuvetteVolume = ipw.BoundedFloatText(
+            value=1500,
+            min=0,
+            max=2000,
+            step=1,
+            description='Volume (μL):',
+            layout=ipw.Layout(width='200px'),
+            style={'description_width': '80px'}
         )
 
         Runs_Selected = ipw.SelectMultiple(
@@ -695,9 +733,11 @@ class UI :
 
         def Plot_Clicked(b):
             with out2 :
-                data = self.data
+                data = self.data.copy(deep=True)
                 clear_output()
-                spectra = dt.createSpectra(data,Runs_Selected.value,Buffer=Buffer.value,CamScale=CamScale.value)
+                if ConcCorrection.value :
+                    data = at.AdjustConcentration(data,CuvetteVolume.value)
+                spectra = dt.createSpectra(data,Runs_Selected.value,Buffer=Buffer.value,CamSubtraction=CamSubtraction.value)
                 self.fig = dt.plot(spectra)
                 display(ipw.Box([SavePlot,SpectraToClipboard,Plot2D]))
                 display(ipw.Box([Integrate,Fit]))
