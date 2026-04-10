@@ -25,28 +25,35 @@ class dataTools :
         
         pass
 
-    def loadData(self,file) :
-        
-        for file_info in file :
-            filename = file_info['name']
-            content = file_info['content']
+    def loadData(self, file):
+        for file_info in file:
+            filename = file_info["name"]
+            content = file_info["content"]
             try:
-                if filename.lower().endswith('.csv'):
-                    data = pd.read_csv(io.BytesIO(content))
-                elif filename.lower().endswith('.xlsx'):
-                    data = pd.read_excel(io.BytesIO(content))
-                else:
-                    print(filename+": Unsupported file type.")
-                    data = None
-                    return
-                data = data.apply(pd.to_numeric, errors='coerce')
-                data.columns = ["Wavelength (nm)","Absorbance (au)"]
-                data = data.iloc[::-1].reset_index(drop=True)
-                data = data.dropna()
-                # print(filename+": loaded successfully.")
+                # Convert memoryview → bytes → text
+                text = io.StringIO(bytes(content).decode(errors="ignore"))
+                rows = []
+                for line in text:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        x = float(parts[0])
+                        y = float(parts[1])
+                        rows.append((x, y))
+                    except ValueError:
+                        continue
+                if len(rows) < 10:
+                    raise ValueError("No valid numeric UV-Vis data found.")
+                data = pd.DataFrame(
+                    rows,
+                    columns=["Wavelength (nm)", "Absorbance (au)"]
+                )
+                # Ensure ascending wavelength
+                data = data.sort_values("Wavelength (nm)").reset_index(drop=True)
             except Exception as e:
                 print(f"{filename}: Error reading file: {e}")
-                data = None
+                return None
         return data
     
     def plot(self, data, Title=''):
@@ -273,7 +280,7 @@ class UI :
                 UpLim.value = 700
                 display(ipw.Box([LowLim, UpLim, Fit]))
             with anout :    
-                clear_output
+                clear_output()
             self.data = data
         uploadFile.observe(on_uploadFile_change, names='value')
 
