@@ -359,7 +359,7 @@ class dataTools :
     
     def plot(self, data, Title=''):
         
-        fontsize = 16
+        fontsize = 24
         fig, ax = plt.subplots(figsize=(10, 8))
         handles = []
         labels = []
@@ -372,6 +372,7 @@ class dataTools :
         ax.set_ylabel('Intensity (au)', fontsize=fontsize)
         ax.set_title(Title, fontsize=fontsize)
         ax.tick_params(axis='both', which='both', labelsize=fontsize, direction="in")
+        ax.set_yticks([])
         ax.minorticks_on()
         fig.tight_layout()
         plt.show()
