@@ -505,8 +505,8 @@ class analysisTools :
         # Plot integrated areas
         plt.figure(figsize=(10, 3))
         plt.plot(data2fit.columns, integratedAreas, 'o-')
-        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
-        plt.ylabel('Intensity (au)',fontsize=fontsize)
+        plt.xlabel('Run',fontsize=fontsize)
+        plt.ylabel('Integrated Intensity (au)',fontsize=fontsize)
         plt.tick_params(axis="both", labelsize=fontsize)
         plt.title('Integrated areas')
         plt.grid(True)
@@ -515,8 +515,8 @@ class analysisTools :
         # Plot peak values
         plt.figure(figsize=(10, 3))
         plt.plot(data2fit.columns, peakValues, 'o-')
-        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
-        plt.ylabel('Intensity (au)',fontsize=fontsize)
+        plt.xlabel('Run',fontsize=fontsize)
+        plt.ylabel('Wavelength (nm)',fontsize=fontsize)
         plt.tick_params(axis="both", labelsize=fontsize)
         plt.title('Peak values')
         plt.grid(True)
