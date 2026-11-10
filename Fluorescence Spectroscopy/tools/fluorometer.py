@@ -11,6 +11,8 @@ from IPython.display import clear_output
 import os
 from pathlib import Path
 import io
+import tempfile
+import zipfile
 # New for .gxz debug + parsing
 import gzip
 import re
@@ -450,84 +452,272 @@ class analysisTools :
         data *= (volume+titration)/volume
         return data
 
-    def Integrate(self, data, limits):
-        
-        data = self.ExtractTitration(data)
-        data = data.loc[(data.index >= min(limits)) & (data.index <= max(limits))]
-        integratedValues = list()
-        for idx, column in enumerate(data) :
-            x = data.index.to_numpy()
-            y = data[column].to_numpy()
-            integratedValues.append(integrate.trapezoid(y,x=x))
-        integratedValues = pd.DataFrame(data=integratedValues,index=data.columns,columns=['Integrated'])
-        fontsize = 14
-        plt.figure(figsize=(12,4))
-        plt.xlabel('Run',fontsize=fontsize), plt.ylabel('Integrated Value',fontsize=fontsize)
-        plt.plot(integratedValues, '.-')
-        plt.tick_params(axis="x", labelsize=fontsize, rotation=-90)
-        plt.tick_params(axis="y", labelsize=fontsize)
-        plt.show()
-        return integratedValues
+    def _titrant_axis(self, columns, fallback_values=None):
+        """Return titrant volumes for run columns, with deterministic fallbacks.
 
-    def Fit(self,data,limits) :
-        
-        data = self.ExtractTitration(data)
-        fontsize = 14
-        integratedAreas = list()
-        peakValues = list()
-        data2fit = data.loc[(data.index >= min(limits)) & (data.index <= max(limits))]
-        plt.figure(figsize=(10, 6))
-        x_vals = data2fit.index.to_numpy()
-        for col in data2fit.columns:
-            y_vals = data2fit[col].to_numpy()
-            model = SkewedGaussianModel()
-            params = model.guess(y_vals, x=x_vals)
-            result = model.fit(y_vals, params, x=x_vals)
-            x_fine = np.linspace(x_vals.min(), x_vals.max(), int((x_vals.max()-x_vals.min())*20))
-            y_fine = model.eval(result.params, x=x_fine)
+        Priority: volume parsed from run name, optional user-entered fallback list,
+        numeric column label, then zero-based acquisition order.
+        """
+        cols = [str(c) for c in columns]
+        manual = []
+        if fallback_values:
+            try:
+                manual = [float(v.strip()) for v in str(fallback_values).split(',') if v.strip()]
+            except ValueError:
+                manual = []
+        values, sources = [], []
+        for i, col in enumerate(cols):
+            parsed = self.ParseRunName(col)['Titrant (uL)']
+            if parsed is not None:
+                values.append(float(parsed)); sources.append('run name')
+            elif len(manual) == len(cols):
+                values.append(manual[i]); sources.append('manual fallback')
+            else:
+                try:
+                    values.append(float(col)); sources.append('numeric label')
+                except ValueError:
+                    values.append(float(i)); sources.append('acquisition order')
+        return np.asarray(values, float), sources
 
-            plt.scatter(data.index.to_numpy(), data[col].to_numpy(), s=20)
-            plt.plot(x_fine, y_fine, linewidth=2, label=f'{col}')
-            
-            integratedAreas.append(result.params['amplitude'].value)
-            peakValues.append(x_fine[np.argmax(y_fine)])
+    def Integrate(self, data, limits, fallback_values=None):
+        """Numerically integrate selected spectra and plot against titrant amount."""
+        lower, upper = sorted(map(float, limits))
+        subset = data.loc[(data.index >= lower) & (data.index <= upper)]
+        amounts, sources = self._titrant_axis(subset.columns, fallback_values)
+        rows = []
+        for i, column in enumerate(subset.columns):
+            x = np.asarray(subset.index, float)
+            y = np.asarray(subset[column], float)
+            finite = np.isfinite(x) & np.isfinite(y)
+            area = float(integrate.trapezoid(y[finite], x=x[finite]))
+            rows.append({'Run': str(column), 'Titrant (uL)': amounts[i],
+                         'Integrated': area, 'Titrant source': sources[i]})
+        result = pd.DataFrame(rows).sort_values('Titrant (uL)')
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(result['Titrant (uL)'], result['Integrated'], 'o-')
+        ax.set(xlabel='Titrant added (uL)', ylabel='Integrated intensity (au)',
+               title=f'Integrated fluorescence: {lower:g}-{upper:g} nm')
+        ax.grid(True, alpha=.25); fig.tight_layout(); plt.show()
+        return result
 
-        # Finalize plot
-        plt.xlabel('Wavelength (nm)',fontsize=fontsize)
-        plt.ylabel('Intensity (au)',fontsize=fontsize)
-        plt.tick_params(axis="x", labelsize=fontsize)
-        plt.tick_params(axis="y", labelsize=fontsize)
-        plt.title('Fits')
-        plt.legend(frameon=False)
-        plt.grid(True)
+    def Fit(self, data, limits, method='Skewed Gaussian', r2_threshold=0.95,
+            fallback_values=None):
+        """Use the same lambda-max model and quality criteria as Analyze."""
+        amounts, sources = self._titrant_axis(data.columns, fallback_values)
+        rows, details = [], []
+        for i, column in enumerate(data.columns):
+            fit = self._fit_peak(data.index, data[column], limits, method, r2_threshold)
+            lam, xf, yf, xfine, yfine, r2, rmse, used_method, fit_ok = fit
+            rows.append({'Run': str(column), 'Titrant (uL)': amounts[i],
+                         'Lambda max (nm)': lam, 'R2': r2, 'RMSE': rmse,
+                         'Fit method': used_method, 'Fit OK': fit_ok,
+                         'Titrant source': sources[i]})
+            details.append((str(column), amounts[i], xf, yf, xfine, yfine, fit_ok))
+        result = pd.DataFrame(rows).sort_values('Titrant (uL)')
+
+        fig1, ax = plt.subplots(figsize=(10, 6))
+        cmap = plt.get_cmap('viridis')
+        unique = sorted(set(amounts))
+        colors = {a:cmap(j/max(1,len(unique)-1)) for j,a in enumerate(unique)}
+        for run, amount, xf, yf, xfine, yfine, ok in details:
+            c=colors[amount]
+            ax.plot(xf, yf, 'o', ms=3, alpha=.45, color=c, label=f'{amount:g} uL')
+            ax.plot(xfine, yfine, '-' if ok else '--', lw=2, color=c)
+        handles, labels = ax.get_legend_handles_labels(); dedup=dict(zip(labels,handles))
+        ax.legend(dedup.values(),dedup.keys(),title='Titrant',frameon=False)
+        ax.set(xlabel='Wavelength (nm)',ylabel='Intensity (au)',title=f'{method} fits')
+        ax.grid(True,alpha=.25); fig1.tight_layout(); plt.show()
+
+        fig2, ax2 = plt.subplots(figsize=(10,4))
+        ax2.plot(result['Titrant (uL)'], result['Lambda max (nm)'], 'o-')
+        bad=result[~result['Fit OK']]
+        if not bad.empty:
+            ax2.plot(bad['Titrant (uL)'],bad['Lambda max (nm)'],'x',ms=10,mew=2,color='red',label='Below fit threshold')
+            ax2.legend(frameon=False)
+        ax2.set(xlabel='Titrant added (uL)',ylabel=r'$\lambda_{max}$ (nm)',title='Peak position')
+        ax2.grid(True,alpha=.25); fig2.tight_layout(); plt.show()
+        return result
+
+
+    def ParseRunName(self, run_name):
+        """Parse sample, titrant volume, polarization, replicate, and buffer status."""
+        name = str(run_name)
+        pol_match = re.search(r'(?:^|[_\-\s])(VV|VH)(?=$|[_\-\s])', name, re.IGNORECASE)
+        polarization = pol_match.group(1).upper() if pol_match else None
+        amount_match = re.search(r'([-+]?\d+(?:\.\d+)?)\s*(?:u|µ|μ)\s*[lL](?=$|[_\-\s])', name, re.IGNORECASE)
+        is_buffer = 'buffer' in name.lower()
+        # A polarized, non-buffer run with no explicit uL value is the starting
+        # spectrum and therefore represents 0 uL titrant added.
+        if amount_match:
+            amount = float(amount_match.group(1))
+        elif polarization is not None and not is_buffer:
+            amount = 0.0
+        else:
+            amount = None
+        sample = name
+        if amount_match:
+            sample = name[:amount_match.start()].rstrip('_- ')
+        sample = re.sub(r'(?:^|[_\-\s])(?:VV|VH)(?=$|[_\-\s])', '', sample, flags=re.IGNORECASE).strip('_- ')
+        rep_match = re.search(r'(?:^|[_\-\s])(?:rep|r)?(\d+)$', name, re.IGNORECASE)
+        replicate = int(rep_match.group(1)) if rep_match else 1
+        return {'Sample': sample or 'Sample', 'Titrant (uL)': amount,
+                'Polarization': polarization, 'Replicate': replicate,
+                'Buffer': is_buffer}
+
+    def AutoTitration(self, data):
+        records = []
+        for run in data.columns:
+            rec = self.ParseRunName(run)
+            rec['Run'] = str(run)
+            records.append(rec)
+        return pd.DataFrame(records).set_index('Run')
+
+    @staticmethod
+    def _fit_peak(x, y, limits, method='Skewed Gaussian', r2_threshold=0.95):
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        lower, upper = sorted(map(float, limits))
+        mask = np.isfinite(x) & np.isfinite(y) & (x >= lower) & (x <= upper)
+        x_fit, y_fit = x[mask], y[mask]
+        if x_fit.size < 5:
+            raise ValueError('At least five finite points are required between the fit limits.')
+        if method == 'Smoothed maximum':
+            window = min(11, x_fit.size if x_fit.size % 2 else x_fit.size-1)
+            window = max(3, window)
+            smooth = pd.Series(y_fit).rolling(window, center=True, min_periods=1).mean().to_numpy()
+            i = int(np.nanargmax(smooth))
+            return float(x_fit[i]), x_fit, y_fit, x_fit, smooth, np.nan, np.nan, 'Smoothed maximum', True
+        model = SkewedGaussianModel()
+        result = model.fit(y_fit, model.guess(y_fit, x=x_fit), x=x_fit, nan_policy='omit')
+        predicted = model.eval(result.params, x=x_fit)
+        residual = y_fit - predicted
+        ss_res = float(np.nansum(residual**2))
+        ss_tot = float(np.nansum((y_fit-np.nanmean(y_fit))**2))
+        r2 = 1.0 - ss_res/ss_tot if ss_tot > 0 else np.nan
+        rmse = float(np.sqrt(np.nanmean(residual**2)))
+        x_fine = np.linspace(x_fit.min(), x_fit.max(), max(500, int((x_fit.max()-x_fit.min())*20)))
+        y_fine = model.eval(result.params, x=x_fine)
+        lam = float(x_fine[int(np.nanargmax(y_fine))])
+        ok = bool(np.isfinite(r2) and r2 >= r2_threshold)
+        return lam, x_fit, y_fit, x_fine, y_fine, r2, rmse, 'Skewed Gaussian', ok
+
+    def AnalyzeAnisotropy(self, data, fit_limits, integration_limits,
+                           dilution_volume=None, g_factor=1.0,
+                           fit_method='Skewed Gaussian', r2_threshold=0.95, error_bar_type='SD'):
+        """Analyze all loaded data, validate VV/VH pairs, average replicates, and plot results."""
+        if data is None or data.empty:
+            raise ValueError('No fluorescence data are loaded.')
+        if fit_limits[1] <= fit_limits[0] or integration_limits[1] <= integration_limits[0]:
+            raise ValueError('Upper limits must be greater than lower limits.')
+        if g_factor <= 0:
+            raise ValueError('G factor must be greater than zero.')
+        info = self.AutoTitration(data)
+        samples = info[~info['Buffer']]
+        bad_pol = samples.index[samples['Polarization'].isna()].tolist()
+        bad_amount = samples.index[samples['Titrant (uL)'].isna()].tolist()
+        if bad_pol: raise ValueError('Could not identify VV or VH in: ' + ', '.join(bad_pol))
+        if bad_amount: raise ValueError('Could not identify titrant amount in: ' + ', '.join(bad_amount))
+
+        corrected = data.copy(deep=True)
+        for pol in ('VV','VH'):
+            buffers = info.index[info['Buffer'] & (info['Polarization']==pol)].tolist()
+            if not buffers:
+                raise ValueError(f'No {pol} buffer found. Include "buffer" and "{pol}" in its run name.')
+            baseline = data[buffers].mean(axis=1)
+            targets = info.index[(~info['Buffer']) & (info['Polarization']==pol)]
+            corrected.loc[:, targets] = corrected.loc[:, targets].sub(baseline, axis=0)
+
+        x_all = np.asarray(corrected.index, float)
+        ilow, ihigh = sorted(map(float, integration_limits))
+        imask = np.isfinite(x_all) & (x_all >= ilow) & (x_all <= ihigh)
+        if imask.sum() < 2: raise ValueError('At least two points are required within the integration limits.')
+        rows, details = [], []
+        for run, meta in samples.iterrows():
+            y = corrected[run].copy()
+            amount = float(meta['Titrant (uL)'])
+            if dilution_volume is not None and dilution_volume > 0:
+                y *= (dilution_volume + amount) / dilution_volume
+            fit = self._fit_peak(corrected.index, y, fit_limits, fit_method, r2_threshold)
+            lam, xf, yf, xfine, yfine, r2, rmse, used_method, fit_ok = fit
+            yi = np.asarray(y, float)[imask]; xi = x_all[imask]
+            finite = np.isfinite(xi) & np.isfinite(yi)
+            area = float(integrate.simpson(yi[finite], x=xi[finite]))
+            row = {'Run':run, 'Sample':meta['Sample'], 'Titrant (uL)':amount,
+                   'Polarization':meta['Polarization'], 'Replicate':meta['Replicate'],
+                   'Lambda max (nm)':lam, 'Integrated intensity':area,
+                   'R2':r2, 'RMSE':rmse, 'Fit method':used_method, 'Fit OK':fit_ok}
+            rows.append(row)
+            details.append((row, xf, yf, xfine, yfine))
+        fits = pd.DataFrame(rows)
+
+        groupcols=['Sample','Titrant (uL)','Polarization']
+        summary=fits.groupby(groupcols,as_index=False).agg(
+            **{'Lambda max (nm)':('Lambda max (nm)','mean'),
+               'Lambda SD':('Lambda max (nm)','std'),
+               'Integrated intensity':('Integrated intensity','mean'),
+               'Intensity SD':('Integrated intensity','std'),
+               'n':('Run','count'), 'Fit OK':('Fit OK','all')})
+        summary['Lambda SEM'] = summary['Lambda SD'] / np.sqrt(summary['n'])
+        pair_counts=summary.pivot_table(index=['Sample','Titrant (uL)'],columns='Polarization',values='n',aggfunc='sum')
+        missing=[]
+        for key,row in pair_counts.iterrows():
+            absent=[p for p in ('VV','VH') if p not in row.index or pd.isna(row.get(p))]
+            if absent: missing.append(f'{key[0]}, {key[1]:g} uL: missing {"/".join(absent)}')
+        complete=summary.pivot_table(index=['Sample','Titrant (uL)'],columns='Polarization',values='Integrated intensity')
+        complete=complete.dropna(subset=['VV','VH'])
+        complete['Anisotropy r']=(complete['VV']-g_factor*complete['VH'])/(complete['VV']+2*g_factor*complete['VH'])
+
+        # Propagate replicate variability by calculating replicate-paired anisotropy when possible.
+        rep=fits.pivot_table(index=['Sample','Titrant (uL)','Replicate'],columns='Polarization',values='Integrated intensity')
+        rep=rep.dropna(subset=['VV','VH'])
+        rep['r']=(rep['VV']-g_factor*rep['VH'])/(rep['VV']+2*g_factor*rep['VH'])
+        rstats=rep.groupby(level=[0,1])['r'].agg(['mean','std','count']).rename(columns={'mean':'Anisotropy mean','std':'Anisotropy SD','count':'n pairs'})
+        rstats['Anisotropy SEM'] = rstats['Anisotropy SD'] / np.sqrt(rstats['n pairs'])
+        results=complete.join(rstats,how='left')
+        results['Anisotropy mean']=results['Anisotropy mean'].fillna(results['Anisotropy r'])
+
+        # Coordinated fit figure with same color per titrant in VV and VH.
+        fit_fig,(avv,avh)=plt.subplots(1,2,figsize=(14,6),sharex=True)
+        axes={'VV':avv,'VH':avh}; amounts=sorted(fits['Titrant (uL)'].unique())
+        cmap=plt.get_cmap('viridis'); colors={a:cmap(i/max(1,len(amounts)-1)) for i,a in enumerate(amounts)}
+        self._fit_artists={}
+        for row,xf,yf,xline,yline in details:
+            ax=axes[row['Polarization']]; c=colors[row['Titrant (uL)']]
+            points=ax.plot(xf,yf,'o',ms=3,alpha=.45,color=c,label=f"{row['Titrant (uL)']:g} uL",picker=5)[0]
+            style='-' if row['Fit OK'] else '--'; line=ax.plot(xline,yline,style,lw=2,color=c,alpha=1 if row['Fit OK'] else .75)[0]
+            self._fit_artists[(row['Sample'],row['Titrant (uL)'],row['Polarization'])]=(points,line)
+        for pol,ax in axes.items():
+            ax.set(title=pol,xlabel='Wavelength (nm)',ylabel='Intensity'); ax.grid(True,alpha=.2)
+            handles,labels=ax.get_legend_handles_labels(); unique=dict(zip(labels,handles)); ax.legend(unique.values(),unique.keys(),title='Titrant',frameon=False,fontsize=8)
+        fit_fig.suptitle(f'Data and fits; fit range {fit_limits[0]:g}-{fit_limits[1]:g} nm')
+        fit_fig.tight_layout(); plt.show()
+
+        # Stacked summary, shared x-axis, error bars for replicates.
+        summary_fig,(a1,a2)=plt.subplots(2,1,figsize=(9,9),sharex=True,gridspec_kw={'hspace':.08})
+        self._summary_points={}
+        for pol,c in [('VV','tab:blue'),('VH','tab:orange')]:
+            part=summary[summary['Polarization']==pol].sort_values('Titrant (uL)')
+            artists=a1.errorbar(part['Titrant (uL)'],part['Lambda max (nm)'],yerr=part['Lambda SD'] if error_bar_type == 'SD' else part['Lambda SEM'],fmt='o-',color=c,label=pol,capsize=3,picker=5)
+            for x in part['Titrant (uL)']:
+                self._summary_points[(float(x),pol)]=artists[0]
+        rr=results.reset_index().sort_values('Titrant (uL)')
+        a2.errorbar(rr['Titrant (uL)'],rr['Anisotropy mean'],yerr=rr['Anisotropy SD'] if error_bar_type == 'SD' else rr['Anisotropy SEM'],fmt='o-',color='tab:green',capsize=3,picker=5)
+        a1.set_ylabel(r'$\lambda_{max}$ (nm)'); a1.legend(frameon=False); a1.grid(True,alpha=.25)
+        a1.set_title(f'Fit: {fit_limits[0]:g}-{fit_limits[1]:g} nm; integration: {integration_limits[0]:g}-{integration_limits[1]:g} nm; G={g_factor:g}')
+        a2.set(xlabel='Titrant added (uL)',ylabel='Anisotropy, r'); a2.grid(True,alpha=.25)
+        summary_fig.align_ylabels([a1,a2]); summary_fig.subplots_adjust(hspace=.08)
+
+        # Clicking a summary point highlights the matching VV/VH spectra when the backend supports picking.
+        def on_pick(event):
+            if event.artist.axes not in (a1,a2) or not len(event.ind): return
+            x=float(event.artist.get_xdata()[event.ind[0]])
+            for (sample,amount,pol),(pts,line) in self._fit_artists.items():
+                selected=np.isclose(amount,x)
+                pts.set_alpha(1.0 if selected else .12); line.set_alpha(1.0 if selected else .12)
+                line.set_linewidth(3.5 if selected else 1.5)
+            fit_fig.canvas.draw_idle()
+        summary_fig.canvas.mpl_connect('pick_event',on_pick)
         plt.show()
-        
-        # Plot integrated areas
-        plt.figure(figsize=(10, 3))
-        plt.plot(data2fit.columns, integratedAreas, 'o-')
-        plt.xlabel('Run',fontsize=fontsize)
-        plt.ylabel('Integrated Intensity (au)',fontsize=fontsize)
-        plt.tick_params(axis="both", labelsize=fontsize)
-        plt.title('Integrated areas')
-        plt.grid(True)
-        plt.show()
-        
-        # Plot peak values
-        plt.figure(figsize=(10, 3))
-        plt.plot(data2fit.columns, peakValues, 'o-')
-        plt.xlabel('Run',fontsize=fontsize)
-        plt.ylabel('Wavelength (nm)',fontsize=fontsize)
-        plt.tick_params(axis="both", labelsize=fontsize)
-        plt.title('Peak values')
-        plt.grid(True)
-        plt.show()
-        
-        df = pd.DataFrame()
-        df['Integrated Areas'] = integratedAreas
-        df['Peak Values'] = peakValues
-        df.index = data.columns
-        
-        return df
+        return fits,results,corrected,fit_fig,summary_fig,missing
 
 
 class UI :
@@ -619,8 +809,8 @@ class UI :
                 clear_output()
                 display(ipw.Box([Filter,Update_RunList]))
                 display(ipw.Box([TitrationFile,LoadTitration]))
-                display(ipw.Box([CamSubtraction,DilutionCorrection,CuvetteVolume]))
-                display(ipw.Box([Runs_Selected,Plot]))
+                display(ipw.Box([CamSubtraction,DilutionCorrection,CuvetteVolume,NormalizeDisplay]))
+                display(Runs_Selected)
                 display(ipw.Box([Buffer]))
             with out2 :
                 clear_output()
@@ -636,6 +826,7 @@ class UI :
             self.filename = SelectFile.value
             self.data = data
             RunList()
+            UpdatePlot()
         load_button = ipw.Button(description='Load',layout=Layout(width='10%'))
         load_button.on_click(load)
 
@@ -704,6 +895,19 @@ class UI :
             style={'description_width': '70px'}
         )
 
+        GFactor = ipw.BoundedFloatText(value=1.0, min=0.0001, max=1000.0, step=0.01,
+            description='G factor:', style={'description_width':'100px'})
+        FitMethod = ipw.Dropdown(options=['Skewed Gaussian','Smoothed maximum'], value='Skewed Gaussian',
+            description='Lambda max:', style={'description_width':'100px'})
+        R2Threshold = ipw.BoundedFloatText(value=0.95, min=0.0, max=1.0, step=0.01,
+            description='Min R^2:', style={'description_width':'100px'})
+        ErrorBarType = ipw.Dropdown(options=['SD','SEM'], value='SD',
+            description='Error bars:', style={'description_width':'100px'})
+        TitrantFallback = ipw.Text(
+            value='', placeholder='e.g., 0,1,2,3',
+            description='Fallback uL:', style={'description_width':'100px'})
+        NormalizeDisplay = ipw.Checkbox(value=False, description='Normalize displayed spectra')
+
         Runs_Selected = ipw.SelectMultiple(
             options='',
             style = {'width': '100px','description_width': '150px'},
@@ -722,29 +926,141 @@ class UI :
             disabled=False,
         )
 
-        def Plot_Clicked(b):
-            with out2 :
+        def UpdatePlot(change=None):
+            # Redraw automatically whenever the selected runs or plotting options change.
+            # Do nothing until a file is loaded and at least one run is selected.
+            if not hasattr(self, 'data'):
+                return
+            if len(Runs_Selected.value) == 0:
+                with out2:
+                    clear_output(wait=True)
+                    empty = pd.DataFrame(index=self.data.index)
+                    self.fig = dt.plot(empty)
+                    display(ipw.Box([SavePlot, SpectraToClipboard, Plot2D]))
+                    display(ipw.Box([Integrate, Fit, Analyze]))
+                    display(ipw.Box([GFactor, FitMethod, R2Threshold, ErrorBarType, TitrantFallback]))
+                    display(LowLim)
+                    display(UpLim)
+                    display(IntegrationLow)
+                    display(IntegrationHigh)
+                with out3:
+                    clear_output(wait=True)
+                wavelengths = np.asarray(self.data.index, dtype=float)
+                xmin = float(np.nanmin(wavelengths))
+                xmax = float(np.nanmax(wavelengths))
+                # Set values while the widgets still have permissive bounds, then
+                # narrow the bounds to the actual wavelength range.
+                LowLim.value = xmin
+                UpLim.value = xmax
+                LowLim.min = xmin
+                LowLim.max = xmax
+                UpLim.min = xmin
+                UpLim.max = xmax
+                IntegrationLow.value = xmin
+                IntegrationHigh.value = xmax
+                IntegrationLow.min = xmin
+                IntegrationLow.max = xmax
+                IntegrationHigh.min = xmin
+                IntegrationHigh.max = xmax
+                self.spectra = empty
+                return
+
+            with out2:
+                clear_output(wait=True)
                 data = self.data.copy(deep=True)
-                clear_output()
-                if DilutionCorrection.value :
-                    data = at.AdjustConcentration(data,CuvetteVolume.value)
-                spectra = dt.createSpectra(data,Runs_Selected.value,Buffer=Buffer.value,CamSubtraction=CamSubtraction.value)
+                if DilutionCorrection.value:
+                    data = at.AdjustConcentration(data, CuvetteVolume.value)
+                spectra = dt.createSpectra(
+                    data, Runs_Selected.value,
+                    Buffer=Buffer.value,
+                    CamSubtraction=CamSubtraction.value)
+                if NormalizeDisplay.value:
+                    scale = spectra.abs().max(axis=0).replace(0, np.nan)
+                    spectra = spectra.divide(scale, axis=1)
                 self.fig = dt.plot(spectra)
-                display(ipw.Box([SavePlot,SpectraToClipboard,Plot2D]))
-                display(ipw.Box([Integrate,Fit]))
+                display(ipw.Box([SavePlot, SpectraToClipboard, Plot2D]))
+                display(ipw.Box([Integrate, Fit, Analyze]))
+                display(ipw.Box([GFactor, FitMethod, R2Threshold, ErrorBarType, TitrantFallback]))
                 display(LowLim)
                 display(UpLim)
-            with out3 :
-                clear_output()
-            LowLim.max = max(spectra.index)
-            LowLim.min = min(spectra.index)
-            LowLim.value = min(spectra.index)
-            UpLim.max = max(spectra.index)
-            UpLim.min = min(spectra.index)
-            UpLim.value = max(spectra.index)
+                display(IntegrationLow)
+                display(IntegrationHigh)
+
+            with out3:
+                clear_output(wait=True)
+
+            # Initialize the existing limit sliders from the selected spectra only
+            # when the limits are not valid for the new wavelength range. This keeps
+            # user-selected bounds while runs are added/removed from the same dataset.
+            xmin = float(np.nanmin(np.asarray(spectra.index, dtype=float)))
+            xmax = float(np.nanmax(np.asarray(spectra.index, dtype=float)))
+            old_low, old_high = LowLim.value, UpLim.value
+            # Existing selections are already inside the loaded wavelength range;
+            # set/clamp values before changing bounds to avoid trait validation
+            # leaving the sliders at their initial zero values.
+            new_low = old_low if xmin <= old_low <= xmax else xmin
+            new_high = old_high if xmin <= old_high <= xmax else xmax
+            LowLim.value = new_low
+            UpLim.value = new_high
+            LowLim.min = xmin
+            LowLim.max = xmax
+            UpLim.min = xmin
+            UpLim.max = xmax
+            if IntegrationHigh.value <= IntegrationLow.value or not (xmin <= IntegrationLow.value <= xmax) or not (xmin <= IntegrationHigh.value <= xmax):
+                IntegrationLow.value = xmin
+                IntegrationHigh.value = xmax
+            IntegrationLow.min = xmin
+            IntegrationLow.max = xmax
+            IntegrationHigh.min = xmin
+            IntegrationHigh.max = xmax
+            if old_high <= old_low or not (xmin <= old_low <= xmax) or not (xmin <= old_high <= xmax):
+                LowLim.value = xmin
+                UpLim.value = xmax
+            else:
+                LowLim.value = old_low
+                UpLim.value = old_high
             self.spectra = spectra
-        Plot = ipw.Button(description="Plot")
-        Plot.on_click(Plot_Clicked)
+
+        Runs_Selected.observe(UpdatePlot, names='value')
+        Buffer.observe(UpdatePlot, names='value')
+        CamSubtraction.observe(UpdatePlot, names='value')
+        DilutionCorrection.observe(UpdatePlot, names='value')
+        CuvetteVolume.observe(UpdatePlot, names='value')
+        NormalizeDisplay.observe(UpdatePlot, names='value')
+
+        def Analyze_Clicked(b):
+            with out3:
+                clear_output(wait=True)
+                try:
+                    if not hasattr(self, 'data') or self.data.empty:
+                        raise ValueError('Load a data file before analyzing.')
+                    fit_limits = [LowLim.value, UpLim.value]
+                    integration_limits = [IntegrationLow.value, IntegrationHigh.value]
+                    dilution_volume = CuvetteVolume.value if DilutionCorrection.value else None
+                    analysis_data = self.data.copy(deep=True)
+                    fallback, _ = at._titrant_axis(analysis_data.columns, TitrantFallback.value)
+                    renamed = []
+                    for i, col in enumerate(analysis_data.columns):
+                        if at.ParseRunName(col)['Titrant (uL)'] is None and 'buffer' not in str(col).lower():
+                            renamed.append(f'{col}_{fallback[i]:g}uL')
+                        else:
+                            renamed.append(col)
+                    analysis_data.columns = renamed
+                    (self.anisotropyFits, self.anisotropyResults,
+                     self.anisotropySpectra, self.fitFig,
+                     self.analysisFig, warnings) = at.AnalyzeAnisotropy(
+                        analysis_data, fit_limits=fit_limits,
+                        integration_limits=integration_limits,
+                        dilution_volume=dilution_volume, g_factor=GFactor.value,
+                        fit_method=FitMethod.value, r2_threshold=R2Threshold.value, error_bar_type=ErrorBarType.value)
+                    if warnings:
+                        print('Pairing warnings:')
+                        for warning in warnings: print(' - ' + warning)
+                    display(CopyAnalysisData)
+                except Exception as e:
+                    print(f'Analysis failed: {e}')
+        Analyze = ipw.Button(description="Analyze", button_style='success')
+        Analyze.on_click(Analyze_Clicked)
         
         def Plot2d_Clicked(b):
             with out3 :
@@ -758,7 +1074,7 @@ class UI :
             with out3 :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
-                self.integratedValues = at.Integrate(spectra, limits)
+                self.integratedValues = at.Integrate(spectra, [IntegrationLow.value, IntegrationHigh.value], TitrantFallback.value)
                 display(IntegratedToClipboard)
         Integrate = ipw.Button(description="Integrate")
         Integrate.on_click(Integrate_clicked)
@@ -768,10 +1084,65 @@ class UI :
             with out3 :
                 clear_output()
                 limits = [LowLim.value, UpLim.value]
-                self.fitAnalysis = at.Fit(spectra, limits)
+                self.fitAnalysis = at.Fit(spectra, limits, method=FitMethod.value, r2_threshold=R2Threshold.value, fallback_values=TitrantFallback.value)
                 display(FitAnalysisToClipboard)
         Fit = ipw.Button(description="Fit")
         Fit.on_click(Fit_clicked)
+
+        def CopyAnalysisData_Clicked(b):
+            with out3:
+                try:
+                    if not hasattr(self, 'anisotropyFits') or not hasattr(self, 'anisotropyResults'):
+                        print('Run Analyze before copying analysis data.')
+                        return
+
+                    fits = self.anisotropyFits.copy()
+                    lam = fits.groupby(['Sample','Titrant (uL)','Polarization'])['Lambda max (nm)'].agg(
+                        ['mean','std','count']).reset_index()
+                    lam['SEM'] = lam['std'] / np.sqrt(lam['count'])
+
+                    # Always include the core columns. Add replicate statistics only
+                    # when at least one titrant point actually has replicate measurements.
+                    has_replicates = bool((lam['count'] > 1).any())
+
+                    vv = lam[lam['Polarization'] == 'VV'].copy()
+                    vh = lam[lam['Polarization'] == 'VH'].copy()
+                    if has_replicates:
+                        vv = vv.rename(columns={'mean':'Lambda max VV (nm)', 'std':'Lambda max VV SD (nm)',
+                                                'SEM':'Lambda max VV SEM (nm)', 'count':'VV n'})
+                        vh = vh.rename(columns={'mean':'Lambda max VH (nm)', 'std':'Lambda max VH SD (nm)',
+                                                'SEM':'Lambda max VH SEM (nm)', 'count':'VH n'})
+                        vv = vv[['Sample','Titrant (uL)','Lambda max VV (nm)','Lambda max VV SD (nm)','Lambda max VV SEM (nm)','VV n']]
+                        vh = vh[['Sample','Titrant (uL)','Lambda max VH (nm)','Lambda max VH SD (nm)','Lambda max VH SEM (nm)','VH n']]
+                    else:
+                        vv = vv.rename(columns={'mean':'Lambda max VV (nm)'})[['Sample','Titrant (uL)','Lambda max VV (nm)']]
+                        vh = vh.rename(columns={'mean':'Lambda max VH (nm)'})[['Sample','Titrant (uL)','Lambda max VH (nm)']]
+
+                    table = pd.merge(vv, vh, on=['Sample','Titrant (uL)'], how='outer')
+                    anis = self.anisotropyResults.reset_index().copy()
+                    if has_replicates:
+                        keep = [c for c in ['Sample','Titrant (uL)','Anisotropy mean',
+                                            'Anisotropy SD','Anisotropy SEM','n pairs'] if c in anis.columns]
+                    else:
+                        # For a single VV/VH pair, present the anisotropy simply as r.
+                        source = 'Anisotropy mean' if 'Anisotropy mean' in anis.columns else 'Anisotropy r'
+                        anis['Anisotropy'] = anis[source]
+                        keep = [c for c in ['Sample','Titrant (uL)','Anisotropy'] if c in anis.columns]
+                    anis = anis[keep]
+                    table = pd.merge(table, anis, on=['Sample','Titrant (uL)'], how='outer')
+                    table = table.sort_values(['Sample','Titrant (uL)']).reset_index(drop=True)
+
+                    self.analysisTable = table
+                    display(table)
+                    try:
+                        table.to_clipboard(index=False)
+                        print('Lambda max and anisotropy data copied to the clipboard.')
+                    except Exception:
+                        print('The combined table is shown above. Clipboard access is not available in this environment.')
+                except Exception as e:
+                    print(f'Copy failed: {e}')
+        CopyAnalysisData = ipw.Button(description='Copy Analysis Data', button_style='info')
+        CopyAnalysisData.on_click(CopyAnalysisData_Clicked)
 
         def SavePlot_Clicked(b):
             out_path = Path(self.filename).with_suffix('.png')
@@ -799,36 +1170,131 @@ class UI :
         FitAnalysisToClipboard = ipw.Button(description="Copy Fit Analysis")
         FitAnalysisToClipboard.on_click(FitAnalysisToClipboard_Clicked)
         
-        LowLim = ipw.IntSlider(
-            value=0,
-            min=0,
-            max=0,
-            step=1,
-            description='Lower Limit:',
-            disabled=False,
-            continuous_update=False,
-            orientation='horizontal',
-            readout=True,
-            readout_format='d'
-            )
+        LowLim = ipw.FloatSlider(
+            value=0.0, min=-1.0e9, max=1.0e9, step=1.0,
+            description='Fit Lower Limit:', disabled=False,
+            continuous_update=False, orientation='horizontal', readout=True,
+            readout_format='.1f', layout=Layout(width='650px'),
+            style={'description_width':'150px'})
 
-        UpLim = ipw.IntSlider(
-            value=0,
-            min=0,
-            max=0,
-            step=1,
-            description='Upper Limit:',
-            disabled=False,
-            continuous_update=False,
-            orientation='horizontal',
-            readout=True,
-            readout_format='d'
-            )
+        UpLim = ipw.FloatSlider(
+            value=0.0, min=-1.0e9, max=1.0e9, step=1.0,
+            description='Fit Upper Limit:', disabled=False,
+            continuous_update=False, orientation='horizontal', readout=True,
+            readout_format='.1f', layout=Layout(width='650px'),
+            style={'description_width':'150px'})
 
-        display(ipw.HBox([folderField]))
-        display(ipw.HBox([SelectFolder,up_button]))
-        display(ipw.HBox([SelectFile,load_button]))
+        IntegrationLow = ipw.FloatSlider(
+            value=0.0, min=-1.0e9, max=1.0e9, step=1.0,
+            description='Integration Lower Limit:', continuous_update=False,
+            readout_format='.1f', layout=Layout(width='650px'),
+            style={'description_width':'180px'})
+        IntegrationHigh = ipw.FloatSlider(
+            value=0.0, min=-1.0e9, max=1.0e9, step=1.0,
+            description='Integration Upper Limit:', continuous_update=False,
+            readout_format='.1f', layout=Layout(width='650px'),
+            style={'description_width':'180px'})
 
+        # Browser-native file chooser. Multiple fluorescence files can be kept
+        # in memory and switched without reloading them from disk.
+        self.loadedData = {}
+        self.loadedFileNames = []
+        DataFileUpload = ipw.FileUpload(
+            accept='.gxz,.txt,.csv,.dat', multiple=True,
+            description='Open Data Files',
+            layout=Layout(width='180px'))
+        LoadedDataFile = ipw.Dropdown(
+            options=[], value=None, description='Data file:',
+            layout=Layout(width='600px'),
+            style={'description_width':'100px'})
+        ClearLoadedFiles = ipw.Button(description='Clear Files', layout=Layout(width='120px'))
+        UploadStatus = ipw.HTML(value='<i>No data files loaded.</i>')
+
+        def _uploaded_entries(value):
+            """Normalize ipywidgets 7/8 FileUpload values."""
+            if isinstance(value, dict):
+                return [(name, item.get('content', b'')) for name, item in value.items()]
+            entries = []
+            for item in (value or []):
+                name = item.get('name', 'data')
+                entries.append((name, item.get('content', b'')))
+            return entries
+
+        def _load_uploaded_bytes(name, content):
+            """Load one uploaded object with the existing GXZ/text parsers."""
+            raw = content.tobytes() if hasattr(content, 'tobytes') else bytes(content)
+            suffix = Path(name).suffix.lower()
+            # Existing loaders are file based, so use a short-lived temporary file.
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / Path(name).name
+                path.write_bytes(raw)
+                if suffix == '.gxz':
+                    return dt.loadGXZ(str(path.parent), path.name)
+                return dt.loadText(str(path.parent), path.name)
+
+        def _activate_loaded_file(name):
+            if not name or name not in self.loadedData:
+                return
+            self.filename = name
+            self.data = self.loadedData[name].copy(deep=True)
+            Buffer.value = 'None'
+            Runs_Selected.value = []
+            RunList()
+            UpdatePlot()
+
+        def FilesUploaded(change):
+            entries = _uploaded_entries(change.get('new'))
+            if not entries:
+                return
+            errors = []
+            for name, content in entries:
+                try:
+                    self.loadedData[name] = _load_uploaded_bytes(name, content)
+                    if name not in self.loadedFileNames:
+                        self.loadedFileNames.append(name)
+                except Exception as exc:
+                    errors.append(f'{name}: {exc}')
+            LoadedDataFile.options = self.loadedFileNames
+            if self.loadedFileNames:
+                # Select the most recently uploaded file. Setting the dropdown
+                # triggers activation through DataFileChanged.
+                LoadedDataFile.value = self.loadedFileNames[-1]
+                UploadStatus.value = f'<b>{len(self.loadedFileNames)}</b> data file(s) loaded.'
+            if errors:
+                UploadStatus.value += '<br><span style="color:#b00020">' + '<br>'.join(errors) + '</span>'
+
+        def DataFileChanged(change):
+            if change.get('name') == 'value' and change.get('new'):
+                _activate_loaded_file(change['new'])
+
+        def ClearFilesClicked(b):
+            self.loadedData.clear()
+            self.loadedFileNames.clear()
+            LoadedDataFile.options = []
+            LoadedDataFile.value = None
+            DataFileUpload.value = () if not isinstance(DataFileUpload.value, dict) else {}
+            UploadStatus.value = '<i>No data files loaded.</i>'
+            if hasattr(self, 'data'):
+                del self.data
+            Runs_Selected.options = []
+            Buffer.options = ['None']
+            with out1: clear_output(wait=True)
+            with out2: clear_output(wait=True)
+            with out3: clear_output(wait=True)
+
+        DataFileUpload.observe(FilesUploaded, names='value')
+        LoadedDataFile.observe(DataFileChanged, names='value')
+        ClearLoadedFiles.on_click(ClearFilesClicked)
+
+        display(ipw.HBox([DataFileUpload, LoadedDataFile, ClearLoadedFiles]))
+        display(UploadStatus)
+
+        with out1:
+            display(ipw.Box([Filter,Update_RunList]))
+            display(ipw.Box([TitrationFile,LoadTitration]))
+            display(ipw.Box([CamSubtraction,DilutionCorrection,CuvetteVolume,NormalizeDisplay]))
+            display(Runs_Selected)
+            display(ipw.Box([Buffer]))
 
         display(out1)
         display(out2)
