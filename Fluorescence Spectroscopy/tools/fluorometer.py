@@ -122,7 +122,7 @@ class dataTools :
         def _find_name_down(node: ET.Element) -> Optional[str]:
             NAME_TAGS = {
                 "RecordName", "TraceName", "SeriesName", "Label",
-                "DetectorName", "SampleName", "Name"
+                "DetectorName", "ExperimentName", "Name"
             }
             """Search downward (subtree) for any naming tag."""
             for tag in NAME_TAGS:
@@ -387,7 +387,6 @@ class dataTools :
         x = M.columns.to_numpy()
         runs = M.index.astype(str).to_list()
         y = np.arange(len(runs))
-
         plt.figure(figsize=(10, 6))
         im = plt.imshow(M.values, origin='lower', cmap='turbo', aspect='auto',
                         extent=[x.min(), x.max(), y.min(), y.max()])
@@ -444,6 +443,57 @@ class analysisTools :
                     titration.append(column)
             data.columns = titration
         return data
+
+    def ExtractDateFromFilename(self,filename):
+
+        filename = Path(
+            filename
+        ).stem
+        patterns = [
+            r'(\d{8})',
+            r'(\d{6})',
+            r'(\d{4}-\d{2}-\d{2})'
+        ]
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                filename
+            )
+            if match:
+                return match.group(1)
+        return 'Unknown'
+
+    def ExtractExperimentFromFilename(
+            self,
+            filename
+        ):
+
+        stem = Path(filename).stem
+
+        if 'C-MA' in stem:
+            ma = 'C-term MA'
+        elif 'N-MA' in stem:
+            ma = 'N-term MA'
+        elif 'MA' in stem:
+            ma = 'Full MA'
+        else:
+            ma = 'Unknown MA'
+
+        if 'Full-CaM' in stem:
+            cam = 'Full CaM'
+        elif 'C-CaM' in stem:
+            cam = 'C-term CaM'
+        elif 'N-CaM' in stem:
+            cam = 'N-term CaM'
+        else:
+            cam = 'Unknown CaM'
+
+        experiment = f'{ma} + {cam}'
+
+        if 'APO' in stem.upper():
+            experiment += ' (Apo)'
+
+        return experiment
 
     def AdjustConcentration(self,data,volume) :
         
@@ -534,35 +584,144 @@ class analysisTools :
         if not bad.empty:
             ax2.plot(bad['Titrant (uL)'],bad['Lambda max (nm)'],'x',ms=10,mew=2,color='red',label='Below fit threshold')
             ax2.legend(frameon=False)
-        ax2.set(xlabel='Titrant added (uL)',ylabel=r'$\lambda_{max}$ (nm)',title='Peak position')
+        ax2.set(xlabel='Titrant added (uL)',ylabel='Lambda max (nm)',title='Peak position')
         ax2.grid(True,alpha=.25); fig2.tight_layout(); plt.show()
         return result
 
+    @staticmethod
+    def CanonicalExperimentName(experiment):
+
+        s = experiment.lower()
+
+        s = s.replace('_', '-')
+        s = s.replace(' ', '-')
+        s = re.sub(r'-+', '-', s)
+        s = s.strip('-')
+
+        aliases = {
+
+            # MA
+            'c-ma'        : 'C-term MA',
+            'cterm-ma'    : 'C-term MA',
+            'c-term-ma'   : 'C-term MA',
+
+            'n-ma'        : 'N-term MA',
+            'nterm-ma'    : 'N-term MA',
+            'n-term-ma'   : 'N-term MA',
+
+            'ma'          : 'Full MA',
+            'full-ma'     : 'Full MA',
+            'fullma'      : 'Full MA',
+
+            # CaM
+            'cam'         : 'Full CaM',
+            'full-cam'    : 'Full CaM',
+            'fullcam'     : 'Full CaM',
+
+            'c-cam'       : 'C-term CaM',
+            'cterm-cam'   : 'C-term CaM',
+            'c-term-cam'  : 'C-term CaM',
+
+            'n-cam'       : 'N-term CaM',
+            'nterm-cam'   : 'N-term CaM',
+            'n-term-cam'  : 'N-term CaM'
+        }
+
+        return aliases.get(s, experiment)
 
     def ParseRunName(self, run_name):
-        """Parse sample, titrant volume, polarization, replicate, and buffer status."""
         name = str(run_name)
-        pol_match = re.search(r'(?:^|[_\-\s])(VV|VH)(?=$|[_\-\s])', name, re.IGNORECASE)
-        polarization = pol_match.group(1).upper() if pol_match else None
-        amount_match = re.search(r'([-+]?\d+(?:\.\d+)?)\s*(?:u|µ|μ)\s*[lL](?=$|[_\-\s])', name, re.IGNORECASE)
-        is_buffer = 'buffer' in name.lower()
-        # A polarized, non-buffer run with no explicit uL value is the starting
-        # spectrum and therefore represents 0 uL titrant added.
+        name = re.sub(
+            r'_D\d+$',
+            '',
+            name
+        )
+        pol_match = re.search(
+            r'(?:^|[_\-\s])(VV|VH)(?=$|[_\-\s])',
+            name,
+            re.IGNORECASE
+        )
+        polarization = (
+            pol_match.group(1).upper()
+            if pol_match
+            else None
+        )
+        amount_match = re.search(
+            r'([-+]?\d+(?:\.\d+)?)\s*(?:u|µ|μ)\s*[lL]',
+            name,
+            re.IGNORECASE
+        )
+
+        is_buffer = (
+            'buffer' in name.lower()
+        )
+
+        is_apo = bool(
+            re.search(
+                r'\bapo\b',
+                name,
+                re.IGNORECASE
+            )
+        )
+
+        # Build experiment name first
+        experiment = re.sub(
+            r'([-+]?\d+(?:\.\d+)?)\s*(?:u|µ|μ)\s*[lL]',
+            '',
+            name,
+            flags=re.IGNORECASE
+        )
+
+        experiment = re.sub(
+            r'_D\d+$',
+            '',
+            experiment,
+            flags=re.IGNORECASE
+        )
+
+        experiment = re.sub(
+            r'(?:^|[_\-\s])(?:VV|VH)(?=$|[_\-\s])',
+            '',
+            experiment,
+            flags=re.IGNORECASE
+        ).strip('_- ')
+        experiment = self.CanonicalExperimentName(experiment)
+        display_experiment = experiment
+        # Determine titrant amount
+        amount = None
         if amount_match:
-            amount = float(amount_match.group(1))
-        elif polarization is not None and not is_buffer:
+            amount = float(
+                amount_match.group(1)
+            )
+            # Initial cuvette species (MA) should be treated as 0 uL titrant.
+            if (
+                ('MA' in name.upper())
+                and ('CAM' not in name.upper())
+            ):
+                amount = 0.0
+        elif polarization and not is_buffer:
             amount = 0.0
-        else:
-            amount = None
-        sample = name
-        if amount_match:
-            sample = name[:amount_match.start()].rstrip('_- ')
-        sample = re.sub(r'(?:^|[_\-\s])(?:VV|VH)(?=$|[_\-\s])', '', sample, flags=re.IGNORECASE).strip('_- ')
-        rep_match = re.search(r'(?:^|[_\-\s])(?:rep|r)?(\d+)$', name, re.IGNORECASE)
-        replicate = int(rep_match.group(1)) if rep_match else 1
-        return {'Sample': sample or 'Sample', 'Titrant (uL)': amount,
-                'Polarization': polarization, 'Replicate': replicate,
-                'Buffer': is_buffer}
+        rep_match = re.search(
+            r'(?:^|[_\-\s])(?:rep|r)?(\d+)$',
+            name,
+            re.IGNORECASE
+        )
+        replicate = (
+            int(rep_match.group(1))
+            if rep_match
+            else 1
+        )
+
+        return {
+            'Experiment': experiment,
+            'Apo': is_apo,
+            'DisplayExperiment':
+                display_experiment,
+            'Titrant (uL)': amount,
+            'Polarization': polarization,
+            'Replicate': replicate,
+            'Buffer': is_buffer
+        }
 
     def AutoTitration(self, data):
         records = []
@@ -599,10 +758,53 @@ class analysisTools :
         lam = float(x_fine[int(np.nanargmax(y_fine))])
         ok = bool(np.isfinite(r2) and r2 >= r2_threshold)
         return lam, x_fit, y_fit, x_fine, y_fine, r2, rmse, 'Skewed Gaussian', ok
+    
+    @staticmethod
+    def _experiment_count(fits):
+        """
+        Number of independent experiments/files contributing to the plot.
+        """
+        if 'Dataset' not in fits.columns:
+            return 1
 
-    def AnalyzeAnisotropy(self, data, fit_limits, integration_limits,
-                           dilution_volume=None, g_factor=1.0,
-                           fit_method='Skewed Gaussian', r2_threshold=0.95, error_bar_type='SD'):
+        n = fits['Dataset'].dropna().nunique()
+        return max(1, int(n))
+
+    @staticmethod
+    def _plot_mean_sd(
+        ax,
+        x,
+        y,
+        sd,
+        color,
+        label=None,
+        capsize=3
+    ):
+        """
+        Plot mean ± SD.
+        """
+        ax.errorbar(
+            x,
+            y,
+            yerr=sd.fillna(0),
+            fmt='o-',
+            color=color,
+            label=label,
+            capsize=capsize
+        )
+
+    def AnalyzeAnisotropy(
+            self,
+            data,
+            fit_limits,
+            integration_limits,
+            dilution_volume=None,
+            g_factor=1.0,
+            fit_method='Skewed Gaussian',
+            r2_threshold=0.95,
+            error_bar_type='SD',
+            dataset_map=None
+        ):
         """Analyze all loaded data, validate VV/VH pairs, average replicates, and plot results."""
         if data is None or data.empty:
             raise ValueError('No fluorescence data are loaded.')
@@ -611,9 +813,9 @@ class analysisTools :
         if g_factor <= 0:
             raise ValueError('G factor must be greater than zero.')
         info = self.AutoTitration(data)
-        samples = info[~info['Buffer']]
-        bad_pol = samples.index[samples['Polarization'].isna()].tolist()
-        bad_amount = samples.index[samples['Titrant (uL)'].isna()].tolist()
+        experiments = info[~info['Buffer']]
+        bad_pol = experiments.index[experiments['Polarization'].isna()].tolist()
+        bad_amount = experiments.index[experiments['Titrant (uL)'].isna()].tolist()
         if bad_pol: raise ValueError('Could not identify VV or VH in: ' + ', '.join(bad_pol))
         if bad_amount: raise ValueError('Could not identify titrant amount in: ' + ', '.join(bad_amount))
 
@@ -631,7 +833,7 @@ class analysisTools :
         imask = np.isfinite(x_all) & (x_all >= ilow) & (x_all <= ihigh)
         if imask.sum() < 2: raise ValueError('At least two points are required within the integration limits.')
         rows, details = [], []
-        for run, meta in samples.iterrows():
+        for run, meta in experiments.iterrows():
             y = corrected[run].copy()
             amount = float(meta['Titrant (uL)'])
             if dilution_volume is not None and dilution_volume > 0:
@@ -641,15 +843,36 @@ class analysisTools :
             yi = np.asarray(y, float)[imask]; xi = x_all[imask]
             finite = np.isfinite(xi) & np.isfinite(yi)
             area = float(integrate.simpson(yi[finite], x=xi[finite]))
-            row = {'Run':run, 'Sample':meta['Sample'], 'Titrant (uL)':amount,
+            row = {'Run':run, 'Experiment':meta['Experiment'], 'Apo': meta['Apo'], 'DisplayExperiment':meta['DisplayExperiment'], 'Titrant (uL)':amount,
                    'Polarization':meta['Polarization'], 'Replicate':meta['Replicate'],
                    'Lambda max (nm)':lam, 'Integrated intensity':area,
                    'R2':r2, 'RMSE':rmse, 'Fit method':used_method, 'Fit OK':fit_ok}
             rows.append(row)
             details.append((row, xf, yf, xfine, yfine))
         fits = pd.DataFrame(rows)
+        fits['Dataset'] = fits['Run'].str.extract(r'(D\d+)$')
+        fits['Experiment'] = fits['Dataset'].map(
+            lambda d:
+                dataset_map[d]['experiment']
+                if (
+                    dataset_map is not None
+                    and pd.notna(d)
+                    and d in dataset_map
+                )
+                else 'Unknown'
+        )
+        fits['Date'] = fits['Dataset'].map(
+            lambda d: dataset_map[d]['date']
+            if dataset_map is not None and pd.notna(d) and d in dataset_map
+            else 'Unknown'
+        )
+        n_experiments = self._experiment_count(fits)
 
-        groupcols=['Sample','Titrant (uL)','Polarization']
+        groupcols=[
+            'Experiment',
+            'Titrant (uL)',
+            'Polarization'
+        ]
         summary=fits.groupby(groupcols,as_index=False).agg(
             **{'Lambda max (nm)':('Lambda max (nm)','mean'),
                'Lambda SD':('Lambda max (nm)','std'),
@@ -657,17 +880,35 @@ class analysisTools :
                'Intensity SD':('Integrated intensity','std'),
                'n':('Run','count'), 'Fit OK':('Fit OK','all')})
         summary['Lambda SEM'] = summary['Lambda SD'] / np.sqrt(summary['n'])
-        pair_counts=summary.pivot_table(index=['Sample','Titrant (uL)'],columns='Polarization',values='n',aggfunc='sum')
+        pair_counts=summary.pivot_table(
+            index=['Experiment','Titrant (uL)'],
+            columns='Polarization',
+            values='n',
+            aggfunc='sum'
+        )
         missing=[]
         for key,row in pair_counts.iterrows():
             absent=[p for p in ('VV','VH') if p not in row.index or pd.isna(row.get(p))]
             if absent: missing.append(f'{key[0]}, {key[1]:g} uL: missing {"/".join(absent)}')
-        complete=summary.pivot_table(index=['Sample','Titrant (uL)'],columns='Polarization',values='Integrated intensity')
+        complete=summary.pivot_table(
+            index=['Experiment','Titrant (uL)'],
+            columns='Polarization',
+            values='Integrated intensity'
+        )
         complete=complete.dropna(subset=['VV','VH'])
         complete['Anisotropy r']=(complete['VV']-g_factor*complete['VH'])/(complete['VV']+2*g_factor*complete['VH'])
 
         # Propagate replicate variability by calculating replicate-paired anisotropy when possible.
-        rep=fits.pivot_table(index=['Sample','Titrant (uL)','Replicate'],columns='Polarization',values='Integrated intensity')
+        rep = fits.pivot_table(
+            index=[
+                'Experiment',
+                'Titrant (uL)',
+                'Dataset',
+                'Replicate'
+            ],
+            columns='Polarization',
+            values='Integrated intensity'
+        )   
         rep=rep.dropna(subset=['VV','VH'])
         rep['r']=(rep['VV']-g_factor*rep['VH'])/(rep['VV']+2*g_factor*rep['VH'])
         rstats=rep.groupby(level=[0,1])['r'].agg(['mean','std','count']).rename(columns={'mean':'Anisotropy mean','std':'Anisotropy SD','count':'n pairs'})
@@ -682,40 +923,138 @@ class analysisTools :
         self._fit_artists={}
         for row,xf,yf,xline,yline in details:
             ax=axes[row['Polarization']]; c=colors[row['Titrant (uL)']]
-            points=ax.plot(xf,yf,'o',ms=3,alpha=.45,color=c,label=f"{row['Titrant (uL)']:g} uL",picker=5)[0]
+            points=ax.plot(xf,yf,'o',ms=3,alpha=.45,color=c,label=f"{row['Titrant (uL)']:g} uL")[0]
             style='-' if row['Fit OK'] else '--'; line=ax.plot(xline,yline,style,lw=2,color=c,alpha=1 if row['Fit OK'] else .75)[0]
-            self._fit_artists[(row['Sample'],row['Titrant (uL)'],row['Polarization'])]=(points,line)
+            self._fit_artists[(row['Experiment'],row['Titrant (uL)'],row['Polarization'])]=(points,line)
         for pol,ax in axes.items():
             ax.set(title=pol,xlabel='Wavelength (nm)',ylabel='Intensity'); ax.grid(True,alpha=.2)
             handles,labels=ax.get_legend_handles_labels(); unique=dict(zip(labels,handles)); ax.legend(unique.values(),unique.keys(),title='Titrant',frameon=False,fontsize=8)
-        fit_fig.suptitle(f'Data and fits; fit range {fit_limits[0]:g}-{fit_limits[1]:g} nm')
-        fit_fig.tight_layout(); plt.show()
+        dates = sorted(fits['Date'].unique())
+        dates = sorted(
+            set(dates)
+        )
+        experiments = sorted(
+            set(
+                fits[
+                    'DisplayExperiment'
+                ]
+                if 'DisplayExperiment'
+                in fits.columns
+                else
+                fits['Experiment']
+            )
+        )
+        fit_fig.tight_layout()
+        fit_fig.canvas.draw()
+        plt.show()
 
         # Stacked summary, shared x-axis, error bars for replicates.
-        summary_fig,(a1,a2)=plt.subplots(2,1,figsize=(9,9),sharex=True,gridspec_kw={'hspace':.08})
-        self._summary_points={}
-        for pol,c in [('VV','tab:blue'),('VH','tab:orange')]:
-            part=summary[summary['Polarization']==pol].sort_values('Titrant (uL)')
-            artists=a1.errorbar(part['Titrant (uL)'],part['Lambda max (nm)'],yerr=part['Lambda SD'] if error_bar_type == 'SD' else part['Lambda SEM'],fmt='o-',color=c,label=pol,capsize=3,picker=5)
-            for x in part['Titrant (uL)']:
-                self._summary_points[(float(x),pol)]=artists[0]
-        rr=results.reset_index().sort_values('Titrant (uL)')
-        a2.errorbar(rr['Titrant (uL)'],rr['Anisotropy mean'],yerr=rr['Anisotropy SD'] if error_bar_type == 'SD' else rr['Anisotropy SEM'],fmt='o-',color='tab:green',capsize=3,picker=5)
-        a1.set_ylabel(r'$\lambda_{max}$ (nm)'); a1.legend(frameon=False); a1.grid(True,alpha=.25)
-        a1.set_title(f'Fit: {fit_limits[0]:g}-{fit_limits[1]:g} nm; integration: {integration_limits[0]:g}-{integration_limits[1]:g} nm; G={g_factor:g}')
+        summary_fig,(a1,a2)=plt.subplots(
+            2,1,
+            figsize=(8,6),
+            sharex=True
+        )
+        self._summary_points = {}
+        colors = plt.cm.tab10.colors
+        for experiment_idx, experiment in enumerate(
+            sorted(summary['Experiment'].unique())
+        ):
+            experiment_color = colors[
+                experiment_idx % len(colors)
+            ]
+            for pol, linestyle in [
+                ('VV', '-'),
+                ('VH', '--')
+            ]:
+                part = summary[
+                    (summary['Experiment'] == experiment) &
+                    (summary['Polarization'] == pol)
+                ].sort_values('Titrant (uL)')
+                if part.empty:
+                    continue
+                yerr = (
+                    part['Lambda SD']
+                    if error_bar_type == 'SD'
+                    else part['Lambda SEM']
+                )
+                n_rep = int(part['n'].max())
+                artists = a1.errorbar(
+                    part['Titrant (uL)'],
+                    part['Lambda max (nm)'],
+                    yerr=yerr.fillna(0),
+                    fmt='o',
+                    linestyle=linestyle,
+                    color=experiment_color,
+                    label=f'{experiment} ({pol}, n={n_rep}))',
+                    capsize=3
+                )
+                for x in part['Titrant (uL)']:
+                    self._summary_points[
+                        (float(x), experiment, pol)
+                    ] = artists[0]
+        rr = results.reset_index()
+        for experiment_idx, experiment in enumerate(
+            sorted(summary['Experiment'].unique())
+        ):
+            experiment_color = colors[
+                experiment_idx % len(colors)
+            ]
+            part = rr[
+                rr['Experiment'] == experiment
+            ].sort_values(
+                'Titrant (uL)'
+            )
+            if part.empty:
+                continue
+            yerr = (
+                part['Anisotropy SD']
+                if error_bar_type == 'SD'
+                else part['Anisotropy SEM']
+            )
+            n_rep = int(part['n pairs'].max()) if 'n pairs' in part.columns else 1
+            a2.errorbar(
+                part['Titrant (uL)'],
+                part['Anisotropy mean'],
+                yerr=yerr.fillna(0),
+                fmt='o-',
+                color=experiment_color,
+                label=f'{experiment} (n={n_rep})',
+                capsize=3
+            )
+        a2.legend(frameon=False)
+        a1.set_ylabel(r'Lambda max (nm)'); a1.legend(frameon=False); a1.grid(True,alpha=.25)
+        a1.set_title(r'Peak Absorption Wavelength ($\lambda_{\mathrm{max}}$) as a Function of Titrant')
+        proteins = sorted(
+            fits[
+                'DisplayExperiment'
+            ].unique()
+        ) if 'DisplayExperiment' in fits.columns else sorted(
+            fits[
+                'Experiment'
+            ].unique()
+        )
+        dates = sorted(
+            fits[
+                'Date'
+            ].unique()
+        )
+        n = fits['Dataset'].nunique()
+        # title = ', '.join(proteins)
+        a2.set_title('Fluorescence Anisotropy Binding Curve')
         a2.set(xlabel='Titrant added (uL)',ylabel='Anisotropy, r'); a2.grid(True,alpha=.25)
-        summary_fig.align_ylabels([a1,a2]); summary_fig.subplots_adjust(hspace=.08)
+        summary_fig.tight_layout()
 
         # Clicking a summary point highlights the matching VV/VH spectra when the backend supports picking.
         def on_pick(event):
             if event.artist.axes not in (a1,a2) or not len(event.ind): return
             x=float(event.artist.get_xdata()[event.ind[0]])
-            for (sample,amount,pol),(pts,line) in self._fit_artists.items():
-                selected=np.isclose(amount,x)
+            for (experiment,amount,pol),(pts,line) in self._fit_artists.items():
+                selected = (np.isclose(amount, x))
                 pts.set_alpha(1.0 if selected else .12); line.set_alpha(1.0 if selected else .12)
                 line.set_linewidth(3.5 if selected else 1.5)
             fit_fig.canvas.draw_idle()
         summary_fig.canvas.mpl_connect('pick_event',on_pick)
+        summary_fig.canvas.draw()
         plt.show()
         return fits,results,corrected,fit_fig,summary_fig,missing
 
@@ -729,6 +1068,7 @@ class UI :
         
         self.BufferNames = ['None']
         self.Names = ['']
+        self.experiments = {}
 
         self.FoldersLabel = '-------Folders-------'
         self.FilesLabel = '-------Files-------'
@@ -898,7 +1238,7 @@ class UI :
         GFactor = ipw.BoundedFloatText(value=1.0, min=0.0001, max=1000.0, step=0.01,
             description='G factor:', style={'description_width':'100px'})
         FitMethod = ipw.Dropdown(options=['Skewed Gaussian','Smoothed maximum'], value='Skewed Gaussian',
-            description='Lambda max:', style={'description_width':'100px'})
+            description='Lambda max (nm):', style={'description_width':'100px'})
         R2Threshold = ipw.BoundedFloatText(value=0.95, min=0.0, max=1.0, step=0.01,
             description='Min R^2:', style={'description_width':'100px'})
         ErrorBarType = ipw.Dropdown(options=['SD','SEM'], value='SD',
@@ -1049,10 +1389,16 @@ class UI :
                     (self.anisotropyFits, self.anisotropyResults,
                      self.anisotropySpectra, self.fitFig,
                      self.analysisFig, warnings) = at.AnalyzeAnisotropy(
-                        analysis_data, fit_limits=fit_limits,
+                        analysis_data,
+                        fit_limits=fit_limits,
                         integration_limits=integration_limits,
-                        dilution_volume=dilution_volume, g_factor=GFactor.value,
-                        fit_method=FitMethod.value, r2_threshold=R2Threshold.value, error_bar_type=ErrorBarType.value)
+                        dilution_volume=dilution_volume,
+                        g_factor=GFactor.value,
+                        fit_method=FitMethod.value,
+                        r2_threshold=R2Threshold.value,
+                        error_bar_type=ErrorBarType.value,
+                        dataset_map=self.datasetMap
+                    )
                     if warnings:
                         print('Pairing warnings:')
                         for warning in warnings: print(' - ' + warning)
@@ -1097,7 +1443,9 @@ class UI :
                         return
 
                     fits = self.anisotropyFits.copy()
-                    lam = fits.groupby(['Sample','Titrant (uL)','Polarization'])['Lambda max (nm)'].agg(
+                    lam = fits.groupby(
+                        ['Experiment','Titrant (uL)','Polarization']
+                    )['Lambda max (nm)'].agg(
                         ['mean','std','count']).reset_index()
                     lam['SEM'] = lam['std'] / np.sqrt(lam['count'])
 
@@ -1112,25 +1460,25 @@ class UI :
                                                 'SEM':'Lambda max VV SEM (nm)', 'count':'VV n'})
                         vh = vh.rename(columns={'mean':'Lambda max VH (nm)', 'std':'Lambda max VH SD (nm)',
                                                 'SEM':'Lambda max VH SEM (nm)', 'count':'VH n'})
-                        vv = vv[['Sample','Titrant (uL)','Lambda max VV (nm)','Lambda max VV SD (nm)','Lambda max VV SEM (nm)','VV n']]
-                        vh = vh[['Sample','Titrant (uL)','Lambda max VH (nm)','Lambda max VH SD (nm)','Lambda max VH SEM (nm)','VH n']]
+                        vv = vv[['Experiment','Titrant (uL)','Lambda max VV (nm)','Lambda max VV SD (nm)','Lambda max VV SEM (nm)','VV n']]
+                        vh = vh[['Experiment','Titrant (uL)','Lambda max VH (nm)','Lambda max VH SD (nm)','Lambda max VH SEM (nm)','VH n']]
                     else:
-                        vv = vv.rename(columns={'mean':'Lambda max VV (nm)'})[['Sample','Titrant (uL)','Lambda max VV (nm)']]
-                        vh = vh.rename(columns={'mean':'Lambda max VH (nm)'})[['Sample','Titrant (uL)','Lambda max VH (nm)']]
+                        vv = vv.rename(columns={'mean':'Lambda max VV (nm)'})[['Experiment','Titrant (uL)','Lambda max VV (nm)']]
+                        vh = vh.rename(columns={'mean':'Lambda max VH (nm)'})[['Experiment','Titrant (uL)','Lambda max VH (nm)']]
 
-                    table = pd.merge(vv, vh, on=['Sample','Titrant (uL)'], how='outer')
+                    table = pd.merge(vv, vh, on=['Experiment','Titrant (uL)'], how='outer')
                     anis = self.anisotropyResults.reset_index().copy()
                     if has_replicates:
-                        keep = [c for c in ['Sample','Titrant (uL)','Anisotropy mean',
+                        keep = [c for c in ['Experiment','Titrant (uL)','Anisotropy mean',
                                             'Anisotropy SD','Anisotropy SEM','n pairs'] if c in anis.columns]
                     else:
                         # For a single VV/VH pair, present the anisotropy simply as r.
                         source = 'Anisotropy mean' if 'Anisotropy mean' in anis.columns else 'Anisotropy r'
                         anis['Anisotropy'] = anis[source]
-                        keep = [c for c in ['Sample','Titrant (uL)','Anisotropy'] if c in anis.columns]
+                        keep = [c for c in ['Experiment','Titrant (uL)','Anisotropy'] if c in anis.columns]
                     anis = anis[keep]
-                    table = pd.merge(table, anis, on=['Sample','Titrant (uL)'], how='outer')
-                    table = table.sort_values(['Sample','Titrant (uL)']).reset_index(drop=True)
+                    table = pd.merge(table, anis, on=['Experiment','Titrant (uL)'], how='outer')
+                    table = table.sort_values(['Experiment','Titrant (uL)']).reset_index(drop=True)
 
                     self.analysisTable = table
                     display(table)
@@ -1197,16 +1545,25 @@ class UI :
 
         # Browser-native file chooser. Multiple fluorescence files can be kept
         # in memory and switched without reloading them from disk.
-        self.loadedData = {}
-        self.loadedFileNames = []
+        self.experiments = {}
         DataFileUpload = ipw.FileUpload(
             accept='.gxz,.txt,.csv,.dat', multiple=True,
             description='Open Data Files',
             layout=Layout(width='180px'))
-        LoadedDataFile = ipw.Dropdown(
-            options=[], value=None, description='Data file:',
-            layout=Layout(width='600px'),
-            style={'description_width':'100px'})
+        LoadedDataFile = ipw.SelectMultiple(
+            options=[],
+            rows=8,
+            value=(),
+            description='Data Files:',
+            layout=Layout(
+                width='700px',
+                height='150px'
+            ),
+            style={
+                'description_width':
+                '100px'
+            }
+        )
         ClearLoadedFiles = ipw.Button(description='Clear Files', layout=Layout(width='120px'))
         UploadStatus = ipw.HTML(value='<i>No data files loaded.</i>')
 
@@ -1232,44 +1589,113 @@ class UI :
                     return dt.loadGXZ(str(path.parent), path.name)
                 return dt.loadText(str(path.parent), path.name)
 
-        def _activate_loaded_file(name):
-            if not name or name not in self.loadedData:
+        def _activate_loaded_file(names):
+            if not names:
                 return
-            self.filename = name
-            self.data = self.loadedData[name].copy(deep=True)
+            selected = list(names)
+            combined = []
+            experiment_dates = []
+            self.datasetMap = {}
+            for dataset_num, filename in enumerate(selected, start=1):
+                experiment = self.experiments[filename]
+                experiment_dates.append(
+                    experiment['date']
+                )
+                self.datasetMap[f'D{dataset_num}'] = {
+                    'file': filename,
+                    'date': experiment['date'],
+                    'experiment': at.ExtractExperimentFromFilename(
+                        filename
+                    )
+                }
+                tmp = experiment['data'].copy()
+                tmp.columns = [
+                    f'{col}_D{dataset_num}'
+                    for col in tmp.columns
+                ]
+                combined.append(tmp)
+            self.experimentDates = (
+                sorted(
+                    set(
+                        experiment_dates
+                    )
+                )
+            )
+            self.loadedExperimentNames = (
+                selected
+            )
+            self.filename = (
+                '; '.join(
+                    selected
+                )
+            )
+            self.data = pd.concat(
+                combined,
+                axis=1
+            )
             Buffer.value = 'None'
-            Runs_Selected.value = []
+            Runs_Selected.value = ()
             RunList()
             UpdatePlot()
 
         def FilesUploaded(change):
-            entries = _uploaded_entries(change.get('new'))
+            entries = _uploaded_entries(
+                change['new']
+            )
             if not entries:
                 return
             errors = []
             for name, content in entries:
                 try:
-                    self.loadedData[name] = _load_uploaded_bytes(name, content)
-                    if name not in self.loadedFileNames:
-                        self.loadedFileNames.append(name)
+                    data = _load_uploaded_bytes(
+                        name,
+                        content
+                    )
+                    self.experiments[
+                        name
+                    ] = {
+                        'data':
+                            data,
+                        'date':
+                            at.ExtractDateFromFilename(
+                                name
+                            ),
+                        'file':
+                            name
+                    }
                 except Exception as exc:
-                    errors.append(f'{name}: {exc}')
-            LoadedDataFile.options = self.loadedFileNames
-            if self.loadedFileNames:
-                # Select the most recently uploaded file. Setting the dropdown
-                # triggers activation through DataFileChanged.
-                LoadedDataFile.value = self.loadedFileNames[-1]
-                UploadStatus.value = f'<b>{len(self.loadedFileNames)}</b> data file(s) loaded.'
-            if errors:
-                UploadStatus.value += '<br><span style="color:#b00020">' + '<br>'.join(errors) + '</span>'
+                    errors.append(
+                        f'{name}: {exc}'
+                    )
+            names = sorted(
+                self.experiments.keys()
+            )
+            display_names = [
+                f'D{i+1}: {name}'
+                for i, name in enumerate(names)
+            ]
+            LoadedDataFile.options = [
+                (display_names[i], names[i])
+                for i in range(len(names))
+            ]
+            LoadedDataFile.options = names
+            if len(names):
+                LoadedDataFile.value = tuple(
+                    names
+                )
+            UploadStatus.value = (
+                f'<b>{len(names)}</b> '
+                'file(s) loaded.'
+            )
 
         def DataFileChanged(change):
-            if change.get('name') == 'value' and change.get('new'):
-                _activate_loaded_file(change['new'])
+            if change['name'] == 'value':
+                _activate_loaded_file(
+                    change['new']
+                )   
 
         def ClearFilesClicked(b):
-            self.loadedData.clear()
-            self.loadedFileNames.clear()
+            self.experiments.clear()
             LoadedDataFile.options = []
             LoadedDataFile.value = None
             DataFileUpload.value = () if not isinstance(DataFileUpload.value, dict) else {}
