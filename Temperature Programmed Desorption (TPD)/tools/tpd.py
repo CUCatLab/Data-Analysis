@@ -9,16 +9,17 @@ from pandas import DataFrame as df
 import yaml
 import ipywidgets as ipw
 from ipywidgets import Button, Layout
-from IPython.display import clear_output
+from IPython.display import display, clear_output
 import matplotlib.pyplot as plt
 import cmath
 import re
-import yaml
+import tempfile
+
 
 # Plotly settings
 import plotly.graph_objects as go
 import plotly.io as pio
-import plotly.express as px
+# import plotly.express as px
 pio.renderers.default = 'notebook+plotly_mimetype'
 pio.templates.default = 'simple_white'
 pio.templates[pio.templates.default].layout.update(dict(
@@ -179,15 +180,342 @@ class dataTools :
         
         return data, parameters
     
-    def plotData(self,data) :
+    def plotData(
+            self,
+            data,
+            filename=''
+        ):
 
-        fig = go.Figure()
-        fig.update_layout(height=750)
-        for Trace in data :
-            if Trace != 'Time (s)' and Trace != 'Time':
-                fig.add_trace(go.Scatter(x=data.index,y=data[Trace],name=Trace,mode='lines'))
-        fig.update_layout(xaxis_title='Temperature (K)',yaxis_title='Fit Value',legend_title='')
-        fig.show()
+        traces = [
+            c for c in data.columns
+            if c not in [
+                'Time',
+                'Time (s)'
+            ]
+        ]
+
+        default_labels = '\n'.join(
+            f'{trace}={trace}'
+            for trace in traces
+        )
+
+        title_default = (
+            Path(filename).stem
+            if filename else
+            'TPD Analysis'
+        )
+
+        TraceSelector = ipw.SelectMultiple(
+            options=traces,
+            value=tuple(traces),
+            rows=min(10, len(traces)),
+            description='Traces'
+        )
+
+        BaselineCorrection = ipw.Checkbox(
+            value=False,
+            description='Baseline Correct'
+        )
+
+        BaselineMin = ipw.FloatText(
+            value=600,
+            description='Baseline Min'
+        )
+
+        BaselineMax = ipw.FloatText(
+            value=700,
+            description='Baseline Max'
+        )
+
+        ShowBaselineRegion = ipw.Checkbox(
+            value=False,
+            description='Show Region'
+        )
+
+        Title = ipw.Text(
+            value=title_default,
+            description='Title'
+        )
+
+        XLabel = ipw.Text(
+            value='Temperature (K)',
+            description='X Label'
+        )
+
+        YLabel = ipw.Text(
+            value='Counts (au)',
+            description='Y Label'
+        )
+
+        Labels = ipw.Textarea(
+            value=default_labels,
+            description='Labels',
+            layout=ipw.Layout(
+                width='700px',
+                height='250px'
+            )
+        )
+
+        UpdateButton = ipw.Button(
+            description='Update Plot',
+            button_style='success'
+        )
+
+        ShowOptions = ipw.Button(
+            description='Plot Options',
+            button_style='info'
+        )
+
+        output = ipw.Output()
+
+        def parse_labels():
+
+            mapping = {}
+
+            for line in Labels.value.splitlines():
+
+                if '=' in line:
+
+                    old, new = line.split(
+                        '=',
+                        1
+                    )
+
+                    mapping[
+                        old.strip()
+                    ] = new.strip()
+
+            return mapping
+
+        def update_plot(b=None):
+
+            with output:
+
+                clear_output(wait=True)
+
+                fig = go.Figure()
+
+                label_map = parse_labels()
+
+                for trace in TraceSelector.value:
+
+                    y = data[
+                        trace
+                    ].astype(float).copy()
+
+                    if BaselineCorrection.value:
+
+                        baseline_mask = (
+                            (data.index >= BaselineMin.value)
+                            &
+                            (data.index <= BaselineMax.value)
+                        )
+
+                        if np.sum(baseline_mask) > 0:
+
+                            baseline = np.mean(
+                                y[
+                                    baseline_mask
+                                ]
+                            )
+
+                            y = y - baseline
+
+                    fig.add_trace(
+
+                        go.Scatter(
+
+                            x=data.index,
+
+                            y=y,
+
+                            mode='lines',
+
+                            name=label_map.get(
+                                trace,
+                                trace
+                            ),
+
+                            line=dict(
+                                width=3
+                            )
+                        )
+                    )
+
+                if (
+                    BaselineCorrection.value
+                    and
+                    ShowBaselineRegion.value
+                ):
+
+                    fig.add_vrect(
+                        x0=BaselineMin.value,
+                        x1=BaselineMax.value,
+                        fillcolor='lightgray',
+                        opacity=0.15,
+                        layer='below',
+                        line_width=0
+                    )
+
+                fig.add_hline(
+                    y=0,
+                    line_dash='dash',
+                    line_color='black'
+                )
+
+                fig.update_layout(
+
+                    template='simple_white',
+
+                    height=900,
+
+                    title=dict(
+                        text=Title.value,
+                        font=dict(
+                            size=34
+                        )
+                    ),
+
+                    xaxis_title=
+                    XLabel.value,
+
+                    yaxis_title=
+                    YLabel.value,
+
+                    font=dict(
+                        size=28
+                    ),
+
+                    legend=dict(
+
+                        x=0.98,
+                        y=0.98,
+
+                        xanchor='right',
+                        yanchor='top',
+
+                        bgcolor='rgba(0,0,0,0)',
+
+                        borderwidth=0,
+
+                        font=dict(
+                            size=28
+                        )
+                    ),
+
+                    margin=dict(
+                        l=100,
+                        r=50,
+                        b=90,
+                        t=130
+                    )
+                )
+
+                fig.update_xaxes(
+
+                    showline=True,
+                    linewidth=2,
+                    mirror=True,
+                    ticks='inside',
+
+                    tickfont=dict(
+                        size=28
+                    ),
+
+                    title_font=dict(
+                        size=28
+                    )
+                )
+
+                fig.update_yaxes(
+
+                    showline=True,
+                    linewidth=2,
+                    mirror=True,
+                    ticks='inside',
+
+                    tickfont=dict(
+                        size=28
+                    ),
+
+                    title_font=dict(
+                        size=28
+                    )
+                )
+
+                fig.show()
+
+        UpdateButton.on_click(
+            update_plot
+        )
+
+        OptionsBox = ipw.VBox([
+
+            ipw.HBox([
+
+                TraceSelector,
+
+                ipw.VBox([
+
+                    BaselineCorrection,
+                    BaselineMin,
+                    BaselineMax,
+                    ShowBaselineRegion
+
+                ])
+
+            ]),
+
+            Title,
+            XLabel,
+            YLabel,
+
+            Labels,
+
+            UpdateButton
+
+        ])
+
+        OptionsBox.layout.display = 'none'
+
+        def ToggleOptions(b):
+
+            if (
+                OptionsBox.layout.display
+                == 'none'
+            ):
+
+                OptionsBox.layout.display = ''
+
+                ShowOptions.description = (
+                    'Hide Plot Options'
+                )
+
+            else:
+
+                OptionsBox.layout.display = 'none'
+
+                ShowOptions.description = (
+                    'Plot Options'
+                )
+
+        ShowOptions.on_click(
+            ToggleOptions
+        )
+
+        display(
+            ipw.VBox([
+
+                ShowOptions,
+
+                OptionsBox,
+
+                output
+
+            ])
+        )
+
+        update_plot()
 
 
 class analysisTools :
@@ -247,152 +575,493 @@ class analysisTools :
         return Traces, Coverages
 
 
-class UI :
-    
-    def __init__(self) :
+class UI:
+
+    def __init__(self):
 
         dt = dataTools()
         at = analysisTools()
 
-        self.FoldersLabel = '-------Folders-------'
-        self.FilesLabel = '-------Files-------'
-        
-        with open(settingsFile, 'r') as stream :
-            settings = yaml.safe_load(stream)
-            
-        if os.path.isdir(settings['folders']['current']) :
-            self.cwd = settings['folders']['current']
-        else :
-            self.cwd = str(Path(os.getcwd()))
-        
+        try:
+            with open(settingsFile, 'r') as stream:
+                settings = yaml.safe_load(stream) or {}
+        except:
+            settings = {
+                'folders': {
+                    'data': str(Path.cwd())
+                }
+            }
+
+        savedFolder = settings.get(
+            'folders',
+            {}
+        ).get(
+            'data',
+            str(Path.cwd())
+        )
+
+        if Path(savedFolder).is_dir():
+            self.cwd = savedFolder
+        else:
+            self.cwd = str(Path.home())
+
+        self.loadedFiles = {}
+        self.loadedData = {}
+        self.loadedParameters = {}
+
         out = ipw.Output()
 
-        def gotoDataFolder(address):
-            address = Path(address)
-            if address.is_dir():
-                dataFolder.value = str(address)
-                settings['folders']['data'] = str(address)
-                with open(settingsFile, 'w') as f:
-                    yaml.dump(settings, f)
-            else :
-                dataFolder.value = settings['folders']['data']
-                    
-        def newDataFolder(value):
-            gotoDataFolder(dataFolder.value)
-        dataFolder = ipw.Text(value=settings['folders']['data'],
-            layout=Layout(width='70%'),
-            style = {'width': '100px','description_width': '150px'},
-            description='Data Folder')
-        dataFolder.on_submit(newDataFolder)
+        # ----------------------------------
+        # Folder selection
+        # ----------------------------------
 
-        def gotoCurFolder(address):
-            address = Path(address)
-            if address.is_dir():
-                currentFolder.value = str(address)
-                SelectFolder.unobserve(selecting, names='value')
-                SelectFolder.options = self.get_folder_contents(folder=address)[0]
-                SelectFolder.observe(selecting, names='value')
-                SelectFolder.value = None
-                selectFile.options = self.get_folder_contents(folder=address)[1]
-                settings['folders']['current'] = str(address)
-                with open(settingsFile, 'w') as f:
-                    yaml.dump(settings, f)
+        currentFolderLabel = ipw.Label(
+            value=self.cwd,
+            layout=Layout(width='85%')
+        )
 
-        def newCurFolder(value):
-            gotoCurFolder(currentFolder.value)
-        currentFolder = ipw.Text(value=str(self.cwd),
-            layout=Layout(width='70%'),
-            style = {'width': '100px','description_width': '150px'},
-            description='Current Folder')
-        currentFolder.on_submit(newCurFolder)
-                
-        def selecting(value) :
-            if value['new'] and value['new'] not in [self.FoldersLabel, self.FilesLabel] :
-                path = Path(currentFolder.value)
-                newpath = path / value['new']
-                if newpath.is_dir():
-                    gotoCurFolder(newpath)
-                elif newpath.is_file():
-                    #some other condition
-                    pass
-        
-        SelectFolder = ipw.Select(
-            options=self.get_folder_contents(self.cwd)[0],
-            rows=5,
-            value=None,
-            layout=Layout(width='70%'),
-            style = {'width': '100px','description_width': '150px'},
-            description='Subfolders')
-        SelectFolder.observe(selecting, names='value')
-        
-        selectFile = ipw.Select(
-            options=self.get_folder_contents(self.cwd)[1],
-            rows=10,
-            values=None,
-            layout=Layout(width='70%'),
-            style = {'width': '100px','description_width': '150px'},
-            description='Files')
+        SelectFolder = ipw.Text(
+            value=self.cwd,
+            description='Folder:',
+            layout=Layout(width='90%')
+        )
 
-        def parent(value):
-            new = Path(currentFolder.value).parent
-            gotoCurFolder(new)
-        up_button = ipw.Button(description='Up',layout=Layout(width='10%'))
-        up_button.on_click(parent)
+        SelectFolderBox = ipw.VBox(
+            [SelectFolder]
+        )
 
-        def ShowData_Clicked(b) :
-            with out :
-                clear_output(True)
-                data, parameters = dt.loadData([currentFolder.value,selectFile.value],dataFolder.value)
-                self.data = data
-                self.parameters = parameters
-                dt.plotData(data)
-                display(Data2Clipboard)
-        ShowData = ipw.Button(description="Show data")
-        ShowData.on_click(ShowData_Clicked)
-        
-        def Data2Clipboard_Clicked(b):
-            DataToSave = self.data
-            DataToSave.to_clipboard()
-        Data2Clipboard = ipw.Button(description="Copy Data")
-        Data2Clipboard.on_click(Data2Clipboard_Clicked)
+        SelectFolderBox.layout.display = 'none'
 
-        def SimulateTrace_Clicked(b) :
-            with out :
-                clear_output(True)
-                data, parameters = dt.loadData([currentFolder.value,selectFile.value],dataFolder.value)
-                self.data = data
-                self.parameters = parameters
-                HeatingRate = ipw.FloatText(
-                    value=np.around(self.parameters['HeatingRate'],3),
-                    description='Heating Rate (K/s):',
-                    layout=Layout(width='25%'),
-                    style = {'description_width': '140px'},
-                    disabled=False
+        SelectFolderButton = ipw.Button(
+            description='Select Folder',
+            button_style='primary',
+            layout=Layout(width='15%')
+        )
+
+        def SelectFolderButton_Clicked(b):
+
+            if SelectFolderBox.layout.display == 'none':
+                SelectFolderBox.layout.display = ''
+            else:
+                SelectFolderBox.layout.display = 'none'
+
+        SelectFolderButton.on_click(
+            SelectFolderButton_Clicked
+        )
+
+        def FolderChanged(change):
+
+            folder = Path(
+                SelectFolder.value
+            )
+
+            if folder.is_dir():
+
+                currentFolderLabel.value = str(folder)
+
+                settings['folders'][
+                    'data'
+                ] = str(folder)
+
+                with open(
+                    settingsFile,
+                    'w'
+                ) as f:
+                    yaml.dump(
+                        settings,
+                        f
                     )
-                simulatedData, SimulatedCoverages = at.simulateData(data, parameters, HeatingRate.value)
-                self.simulatedData = simulatedData
-                self.SimulatedCoverages = SimulatedCoverages
-                allData = pd.concat([data,simulatedData])
-                dt.plotData(allData)
-                fig = px.line(SimulatedCoverages)
-                fig.update_layout(yaxis_title='Coverage',showlegend=False,height=400)
-                fig.show()
-                display(ipw.Box([SimulateTrace,HeatingRate]))
-        SimulateTrace = ipw.Button(description="Simulate Traces")
-        SimulateTrace.on_click(SimulateTrace_Clicked)
-        
-        display(ipw.HBox([dataFolder]))
-        display(ipw.HBox([currentFolder]))
-        display(ipw.HBox([SelectFolder,up_button]))
-        display(ipw.HBox([selectFile]))
-        display(ipw.HBox([ShowData,SimulateTrace]))
+
+            else:
+
+                print(
+                    f'Folder does not exist: '
+                    f'{folder}'
+                )
+
+        SelectFolder.observe(
+            FolderChanged,
+            names='value'
+        )
+
+        # ----------------------------------
+        # File Upload
+        # ----------------------------------
+
+        DataFileUpload = ipw.FileUpload(
+            accept='.csv,.yaml,.yml',
+            multiple=True,
+            description='Select Analysis Files',
+            layout=Layout(width='220px')
+        )
+
+        LoadedDataFile = ipw.Dropdown(
+            options=[],
+            value=None,
+            description='Active File:',
+            layout=Layout(width='600px'),
+            style={
+                'description_width':
+                '100px'
+            }
+        )
+
+        ClearLoadedFiles = ipw.Button(
+            description='Clear Files',
+            layout=Layout(width='120px')
+        )
+
+        UploadStatus = ipw.HTML(
+            value='<i>No files loaded.</i>'
+        )
+
+        # ----------------------------------
+        # Helpers
+        # ----------------------------------
+
+        def _uploaded_entries(value):
+
+            if isinstance(value, dict):
+
+                return [
+                    (
+                        name,
+                        item.get(
+                            'content',
+                            b''
+                        )
+                    )
+                    for name, item
+                    in value.items()
+                ]
+
+            entries = []
+
+            for item in (value or []):
+
+                entries.append(
+                    (
+                        item.get('name'),
+                        item.get(
+                            'content',
+                            b''
+                        )
+                    )
+                )
+
+            return entries
+
+        def _activate_file(name):
+
+            if (
+                name is None or
+                name not in self.loadedData
+            ):
+                return
+
+            self.data = self.loadedData[
+                name
+            ]
+
+            self.parameters = (
+                self.loadedParameters[
+                    name
+                ]
+            )
+
+            self.filename = name
+
+        # ----------------------------------
+        # Upload callback
+        # ----------------------------------
+
+        def FilesUploaded(change):
+
+            entries = _uploaded_entries(
+                change['new']
+            )
+
+            if len(entries) == 0:
+                return
+
+            errors = []
+
+            for (
+                filename,
+                content
+            ) in entries:
+
+                try:
+
+                    raw = (
+                        content.tobytes()
+                        if hasattr(
+                            content,
+                            'tobytes'
+                        )
+                        else bytes(
+                            content
+                        )
+                    )
+
+                    with tempfile.TemporaryDirectory() as tmpdir:
+
+                        path = (
+                            Path(tmpdir)
+                            / filename
+                        )
+
+                        path.write_bytes(
+                            raw
+                        )
+
+                        data, parameters = (
+                            dt.loadData(
+                                [
+                                    str(
+                                        path.parent
+                                    ),
+                                    path.name
+                                ],
+                                currentFolderLabel.value
+                            )
+                        )
+
+                    self.loadedData[
+                        filename
+                    ] = data
+
+                    self.loadedParameters[
+                        filename
+                    ] = parameters
+
+                except Exception as e:
+
+                    errors.append(
+                        f'{filename}: {e}'
+                    )
+
+            names = sorted(
+                self.loadedData.keys()
+            )
+
+            LoadedDataFile.options = names
+
+            if len(names):
+
+                LoadedDataFile.value = (
+                    names[-1]
+                )
+
+                UploadStatus.value = (
+                    f'<b>{len(names)}</b> '
+                    'file(s) loaded'
+                )
+
+            if errors:
+
+                UploadStatus.value += (
+                    '<br>'
+                    '<span style="color:red">'
+                    + '<br>'.join(errors)
+                    + '</span>'
+                )
+
+        DataFileUpload.observe(
+            FilesUploaded,
+            names='value'
+        )
+
+        # ----------------------------------
+        # Active file changed
+        # ----------------------------------
+
+        def ActiveFileChanged(change):
+
+            if change['new']:
+
+                _activate_file(
+                    change['new']
+                )
+
+        LoadedDataFile.observe(
+            ActiveFileChanged,
+            names='value'
+        )
+
+        # ----------------------------------
+        # Clear files
+        # ----------------------------------
+
+        def ClearFilesClicked(b):
+
+            self.loadedData.clear()
+
+            self.loadedParameters.clear()
+
+            LoadedDataFile.options = []
+
+            LoadedDataFile.value = None
+
+            UploadStatus.value = (
+                '<i>No files loaded.</i>'
+            )
+
+        ClearLoadedFiles.on_click(
+            ClearFilesClicked
+        )
+
+        # ----------------------------------
+        # Show Data
+        # ----------------------------------
+
+        def ShowData_Clicked(b):
+
+            with out:
+
+                clear_output(True)
+
+                if not hasattr(
+                    self,
+                    'data'
+                ):
+
+                    print(
+                        'No file loaded.'
+                    )
+
+                    return
+
+                dt.plotData(
+                    self.data,
+                    self.filename
+                )
+
+                display(
+                    Data2Clipboard
+                )
+
+        ShowData = ipw.Button(
+            description='Show Data',
+            button_style='success'
+        )
+
+        ShowData.on_click(
+            ShowData_Clicked
+        )
+
+        # ----------------------------------
+        # Copy Data
+        # ----------------------------------
+
+        def Data2Clipboard_Clicked(b):
+
+            if hasattr(
+                self,
+                'data'
+            ):
+
+                self.data.to_clipboard()
+
+                print(
+                    'Copied to clipboard.'
+                )
+
+        Data2Clipboard = ipw.Button(
+            description='Copy Data'
+        )
+
+        Data2Clipboard.on_click(
+            Data2Clipboard_Clicked
+        )
+
+        # ----------------------------------
+        # Simulate
+        # ----------------------------------
+
+        def SimulateTrace_Clicked(b):
+
+            with out:
+
+                clear_output(True)
+
+                if not hasattr(
+                    self,
+                    'data'
+                ):
+
+                    print(
+                        'No file loaded.'
+                    )
+
+                    return
+
+                simulatedData, (
+                    SimulatedCoverages
+                ) = at.simulateData(
+                    self.data,
+                    self.parameters,
+                    self.parameters[
+                        'HeatingRate'
+                    ]
+                )
+
+                self.simulatedData = (
+                    simulatedData
+                )
+
+                allData = pd.concat(
+                    [
+                        allData,
+                        simulatedData
+                    ]
+                )
+
+                dt.plotData(
+                    self.data,
+                    self.filename
+                )
+
+        SimulateTrace = ipw.Button(
+            description='Simulate Traces'
+        )
+
+        SimulateTrace.on_click(
+            SimulateTrace_Clicked
+        )
+
+        # ----------------------------------
+        # Display
+        # ----------------------------------
+
+        display(
+            ipw.HBox([
+                SelectFolderButton,
+                currentFolderLabel
+            ])
+        )
+
+        display(
+            SelectFolderBox
+        )
+
+        display(
+            ipw.HBox([
+                DataFileUpload,
+                LoadedDataFile,
+                ClearLoadedFiles
+            ])
+        )
+
+        display(
+            UploadStatus
+        )
+
+        display(
+            ipw.HBox([
+                ShowData,
+                SimulateTrace
+            ])
+        )
 
         display(out)
-
-    def get_folder_contents(self,folder):
-
-        'Gets contents of folder, sorting by folder then files, hiding hidden things'
-        folder = Path(folder)
-        folders = [item.name for item in folder.iterdir() if item.is_dir() and not item.name.startswith('.')]
-        files = [item.name for item in folder.iterdir() if item.is_file() and not item.name.startswith('.')]
-        return sorted(folders), sorted(files)
